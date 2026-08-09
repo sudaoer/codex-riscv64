@@ -29,6 +29,7 @@ jobs:
           python-version: "3.12"
 
       - name: Validate downstream release tooling
+        id: policy
         run: |
           python3 scripts/release.py validate
           python3 -m unittest discover -s tests -v
@@ -51,9 +52,19 @@ jobs:
             scripts.codex_package.test_zsh \
             -v
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ steps.policy.outputs.target }}
+
       - name: Check Cargo workspace metadata
         working-directory: ${{ runner.temp }}/source/codex-rs
-        run: cargo metadata --locked --format-version 1 --no-deps >/dev/null
+        run: |
+          cargo metadata \
+            --locked \
+            --format-version 1 \
+            --filter-platform "${{ steps.policy.outputs.target }}" \
+            >/dev/null
 
       - name: Set up Bazel
         uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0

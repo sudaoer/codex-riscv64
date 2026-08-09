@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: sudoer-wsl-ub2604 <ub2604@sudoer.cn>
 Date: Sat, 8 Aug 2026 23:18:51 +0800
-Subject: [PATCH 2/3] feat: add riscv64 Linux release and sandbox support
+Subject: [PATCH 2/4] feat: add riscv64 Linux release and sandbox support
 
 ---
  .github/scripts/install-musl-build-tools.sh | 87 ++++++++++++++++-----

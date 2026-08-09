@@ -14,7 +14,7 @@
 
 ## Patch ownership
 
-The current three downstream commits were exported as mail patches and tested
+The current downstream commits were exported as mail patches and tested
 against the exact stable tag. OpenAI-owned release workflow changes,
 DotSlash/R2 publication, npm trusted publishing, signing environments, and
 private runner names are deliberately not included. The distribution
@@ -43,17 +43,18 @@ release path.
 ## Implementation verification (2026-08-09)
 
 - The filtered patch series digest is
-  `1a21cb55c006e4d607016fa88f2787b8c79cd4d1f5c71283bd44c8e7545def7c`.
+  `86e47e0ad2c1b3d55ecb5aa33c13af7e68349e35d5b774d012f607ef8e2a018b`.
 - Exact reconstruction from the local upstream mirror verified tag object
   `3ed6f04f6bf8b7c46299d1cb1ff99c74ce21a51d`, peeled commit
-  `be6e8eac029b183056b7e4402879f15d2c85f61b`, and applied all three mail
+  `be6e8eac029b183056b7e4402879f15d2c85f61b`, and applied all four mail
   patches without conflicts or whitespace errors.
 - Two independent reconstructions produced the same patched HEAD,
-  `5dbaa40f06186f07ce82bfeb58b0a326be72e316`; `git am` uses each patch's
+  `70311605cdfdfb51c68f30c7ea3c4bdc151e1747`; `git am` uses each patch's
   author date as the committer date so identical inputs do not acquire a new
   commit SHA on every candidate run.
 - Twelve upstream rusty-V8 helper tests, fourteen package-layout/Cargo helper
-  tests, Cargo locked metadata, and nine downstream release-policy tests pass.
+  tests, target-filtered Cargo locked metadata, and seventeen downstream
+  release-policy/installer tests pass.
 - The local Bazel 9 query could not start inside the restricted Codex sandbox:
   its JVM failed while enumerating/creating loopback networking. The same query
   remains an explicit compatibility workflow gate on an ordinary Ubuntu
@@ -85,3 +86,21 @@ release path.
 - SPDX generation merges the target-filtered Codex workspace and ripgrep
   15.2.0 Cargo metadata. Ripgrep metadata is resolved with its `pcre2` feature,
   and Cargo graph edges are emitted as SPDX `DEPENDS_ON` relationships.
+
+## First hosted build result and follow-up (2026-08-09)
+
+- Compatibility run `31307029344` passed. Candidate run `31307066391` then
+  built the complete RISC-V V8 target successfully (15,712 actions in
+  9,104.438 seconds) before the first Cargo build rejected the stale lockfile.
+- The pinned upstream release tree declares workspace version `0.147.0`, while
+  135 workspace package entries in its checked-in `Cargo.lock` still recorded
+  `0.0.0`. Re-resolving the same target changed only those workspace package
+  versions; no registry package version or checksum changed.
+- A fourth ordered mail patch carries that deterministic lockfile repair.
+  Both compatibility and Candidate workflows now resolve the complete
+  `riscv64gc-unknown-linux-musl` graph with `--locked` before the expensive V8
+  build. The previous `--no-deps` compatibility check could not detect this
+  workspace lock mismatch.
+- The pinned Rust action is version-specific and accepts only target/component
+  inputs. Its invalid `toolchain` input was removed, eliminating the hosted
+  runner warning while retaining Rust 1.95.0 from the pinned action revision.

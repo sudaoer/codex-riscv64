@@ -65,7 +65,6 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          toolchain: ${{ steps.policy.outputs.rust }}
           targets: ${{ steps.policy.outputs.target }}
 
       - name: Use a hermetic Cargo home
@@ -75,6 +74,15 @@ jobs:
           : >"$cargo_home/config.toml"
           echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
           echo "$cargo_home/bin" >> "$GITHUB_PATH"
+
+      - name: Check target Cargo lockfile
+        working-directory: ${{ runner.temp }}/source/codex-rs
+        run: |
+          cargo metadata \
+            --locked \
+            --format-version 1 \
+            --filter-platform "${{ steps.policy.outputs.target }}" \
+            >/dev/null
 
       - name: Set up Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1

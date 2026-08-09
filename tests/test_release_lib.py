@@ -43,9 +43,20 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             patch_series_digest(self.manifest.patches_dir),
-            "1a21cb55c006e4d607016fa88f2787b8c79cd4d1f5c71283bd44c8e7545def7c",
+            "86e47e0ad2c1b3d55ecb5aa33c13af7e68349e35d5b774d012f607ef8e2a018b",
         )
         check_patch_scope(self.manifest.patches_dir)
+
+    def test_workflows_check_the_full_locked_target_graph(self) -> None:
+        for workflow_name in ("compat-check.yml", "candidate-build.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+            self.assertIn("cargo metadata", workflow)
+            self.assertIn("--locked", workflow)
+            self.assertIn("--filter-platform", workflow)
+            self.assertNotIn("--no-deps", workflow)
+
+        candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
+        self.assertNotIn("toolchain: ${{ steps.policy.outputs.rust }}", candidate)
 
     def test_manifest_update_replaces_only_named_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
