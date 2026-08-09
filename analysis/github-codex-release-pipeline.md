@@ -1,0 +1,87 @@
+# Codex RISC-V GitHub release pipeline
+
+## Implemented baseline
+
+- Distribution repository shape: thin manifest + ordered patch series + release
+  tooling; the upstream Git history is reconstructed for each run.
+- Initial upstream: `rust-v0.147.0`, tag object
+  `3ed6f04f6bf8b7c46299d1cb1ff99c74ce21a51d`, commit
+  `be6e8eac029b183056b7e4402879f15d2c85f61b`.
+- Stable target: `riscv64gc-unknown-linux-musl`, with `rv64gc` as the CPU
+  baseline and Highway RVV dispatch disabled.
+- Toolchain baseline: Rust 1.95.0, Zig 0.14.0, Bazel from the upstream
+  `.bazelversion`, and V8 150.4.0 from the upstream lockfile.
+
+## Patch ownership
+
+The current three downstream commits were exported as mail patches and tested
+against the exact stable tag. OpenAI-owned release workflow changes,
+DotSlash/R2 publication, npm trusted publishing, signing environments, and
+private runner names are deliberately not included. The distribution
+workflows own the RISC-V build and publication sequence.
+
+## Runtime gate
+
+GitHub builds candidates without K3 credentials. A local maintainer command
+downloads and verifies one candidate run, tests the exact bytes under a remote
+temporary directory on K3, removes the temporary files, and emits structured
+JSON. Publication consumes that report and requires an explicit protected
+environment approval.
+
+## Failure classification
+
+- Patch apply or target-list drift: downstream compatibility failure.
+- V8 source-list or archive mismatch: V8 artifact failure.
+- Rust/LLVM compiler SIGSEGV: toolchain code-generation failure.
+- Archive/ELF/sidecar mismatch: packaging failure.
+- Native command or kernel feature failure: K3 runtime failure.
+
+The recorded ThinLTO/RVV compiler crash concerns the experimental RVA23/GNU
+optimized CLI. It must not be used to weaken or skip the validated RV64GC musl
+release path.
+
+## Implementation verification (2026-08-09)
+
+- The filtered patch series digest is
+  `1a21cb55c006e4d607016fa88f2787b8c79cd4d1f5c71283bd44c8e7545def7c`.
+- Exact reconstruction from the local upstream mirror verified tag object
+  `3ed6f04f6bf8b7c46299d1cb1ff99c74ce21a51d`, peeled commit
+  `be6e8eac029b183056b7e4402879f15d2c85f61b`, and applied all three mail
+  patches without conflicts or whitespace errors.
+- Two independent reconstructions produced the same patched HEAD,
+  `5dbaa40f06186f07ce82bfeb58b0a326be72e316`; `git am` uses each patch's
+  author date as the committer date so identical inputs do not acquire a new
+  commit SHA on every candidate run.
+- Twelve upstream rusty-V8 helper tests, fourteen package-layout/Cargo helper
+  tests, Cargo locked metadata, and nine downstream release-policy tests pass.
+- The local Bazel 9 query could not start inside the restricted Codex sandbox:
+  its JVM failed while enumerating/creating loopback networking. The same query
+  remains an explicit compatibility workflow gate on an ordinary Ubuntu
+  runner; this is an environment limitation, not a successful target query.
+- No remote repository, GitHub App, protected environment, release, or K3
+  mutation was created during local implementation.
+- Read-only K3 preflight reports Linux 6.18.3 `riscv64`, Python 3.14.4, tar,
+  sha256sum, and unshare. A direct unprivileged user/PID namespace probe
+  succeeds. K3 currently has neither curl nor wget, which does not affect the
+  candidate path because assets are copied over SSH and the installer is given
+  local `--archive`/`--release-json` inputs.
+- The live watcher resolved the same current stable tag, Rust 1.95.0, and V8
+  150.4.0 without changing the manifest. All four workflows pass actionlint
+  1.7.12 after checksum-verifying the validator binary.
+
+## Review fixes (2026-08-09)
+
+- Candidate run validation now accepts the Actions REST API `path` value
+  `.github/workflows/candidate-build.yml`; the K3 command and publish workflow
+  call one shared validator, which also tolerates an explicit `@ref` form.
+- The bwrap namespace probe expects the supervised command at PID 2. Bubblewrap
+  remains PID 1 inside its newly created PID namespace.
+- Candidate construction starts only in an empty directory. Finalization and
+  every later validation reject missing, extra, non-regular, or symlinked
+  entries outside the sealed asset set plus `candidate.json`.
+- Installer roots are resolved to absolute paths before constructing atomic
+  symlinks. A regression test performs two installs with relative roots and
+  checks both resolved targets.
+- SPDX generation merges the target-filtered Codex workspace and ripgrep
+  15.2.0 Cargo metadata. Ripgrep metadata is resolved with its `pcre2` feature,
+  and Cargo graph edges are emitted as SPDX `DEPENDS_ON` relationships.

@@ -1,0 +1,27 @@
+schema_version = 1
+
+[distribution]
+repository = "sudaoer/codex-riscv64"
+channel = "stable"
+revision = 1
+target = "riscv64gc-unknown-linux-musl"
+candidate_retention_days = 14
+k3_report_max_age_days = 7
+
+[upstream]
+repository = "openai/codex"
+version = "0.147.0"
+tag = "rust-v0.147.0"
+tag_object_sha = "3ed6f04f6bf8b7c46299d1cb1ff99c74ce21a51d"
+commit_sha = "be6e8eac029b183056b7e4402879f15d2c85f61b"
+
+[toolchain]
+rust = "1.95.0"
+zig = "0.14.0"
+rusty_v8 = "150.4.0"
+
+[policy]
+cpu_baseline = "rv64gc"
+allow_rvv = false
+release_profile = "release"
+v8_profile = "ptrcomp_sandbox_release"

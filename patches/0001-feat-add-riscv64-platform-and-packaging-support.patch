@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sudoer-wsl-ub2604 <ub2604@sudoer.cn>
+Date: Sat, 8 Aug 2026 23:18:05 +0800
+Subject: [PATCH 1/3] feat: add riscv64 platform and packaging support
+
+---
+ MODULE.bazel                                  |  2 +
+ README.md                                     |  1 +
+ codex-cli/bin/codex.js                        |  4 ++
+ codex-cli/scripts/build_npm_package.py        |  8 ++++
+ .../exec-server/testing/run_version_skew.sh   |  1 +
+ .../npm/bin/codex-responses-api-proxy.js      |  3 ++
+ docs/riscv64-linux.md                         |  4 ++
+ scripts/codex_package/targets.py              |  7 +++
+ scripts/codex_package/test_targets.py         | 22 +++++++++
+ scripts/install/install.sh                    |  7 +++
+ scripts/install/test_install_sh.py            | 48 ++++++++++++++++++-
+ scripts/stage_npm_packages.py                 |  1 +
+ sdk/python/_runtime_setup.py                  |  2 +
+ .../test_artifact_workflow_and_binaries.py    |  5 ++
+ sdk/typescript/src/exec.ts                    |  4 ++
+ 15 files changed, 118 insertions(+), 1 deletion(-)
+ create mode 100644 docs/riscv64-linux.md
+ create mode 100644 scripts/codex_package/test_targets.py
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 5fa0329a7f..5244d5b2ba 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -219,6 +219,7 @@ crate.from_cargo(
+         # MSVC names while targeting the GNU toolchain.
+         "aarch64-pc-windows-msvc",
+         "aarch64-pc-windows-gnullvm",
++        "riscv64gc-unknown-linux-musl",
+         "x86_64-unknown-linux-gnu",
+         "x86_64-unknown-linux-musl",
+         "x86_64-apple-darwin",
+@@ -236,6 +237,7 @@ crate.from_cargo(
+         "aarch64-apple-darwin",
+         "aarch64-pc-windows-msvc",
+         "aarch64-pc-windows-gnullvm",
++        "riscv64gc-unknown-linux-musl",
+         "x86_64-unknown-linux-gnu",
+         "x86_64-unknown-linux-musl",
+         "x86_64-apple-darwin",
+diff --git a/README.md b/README.md
+index 06b02fced7..28eeb9e9ad 100644
+--- a/README.md
++++ b/README.md
+@@ -60,6 +60,7 @@ Each GitHub Release contains many executables, but in practice, you likely want
+ - Linux
+   - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
+   - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
++  - riscv64: `codex-riscv64gc-unknown-linux-musl.tar.gz`
+ 
+ Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+ 
+diff --git a/codex-cli/bin/codex.js b/codex-cli/bin/codex.js
+index a307e38610..26ec533b7b 100755
+--- a/codex-cli/bin/codex.js
++++ b/codex-cli/bin/codex.js
+@@ -16,6 +16,7 @@ const codexPackageRoot = realpathSync(path.join(__dirname, ".."));
+ const PLATFORM_PACKAGE_BY_TARGET = {
+   "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
+   "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
++  "riscv64gc-unknown-linux-musl": "@openai/codex-linux-riscv64",
+   "x86_64-apple-darwin": "@openai/codex-darwin-x64",
+   "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
+   "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
+@@ -35,6 +36,9 @@ switch (platform) {
+       case "arm64":
+         targetTriple = "aarch64-unknown-linux-musl";
+         break;
++      case "riscv64":
++        targetTriple = "riscv64gc-unknown-linux-musl";
++        break;
+       default:
+         break;
+     }
+diff --git a/codex-cli/scripts/build_npm_package.py b/codex-cli/scripts/build_npm_package.py
+index 60f6ca7a9d..302c70a8c3 100755
+--- a/codex-cli/scripts/build_npm_package.py
++++ b/codex-cli/scripts/build_npm_package.py
+@@ -35,6 +35,13 @@ CODEX_PLATFORM_PACKAGES: dict[str, dict[str, str]] = {
+         "os": "linux",
+         "cpu": "arm64",
+     },
++    "codex-linux-riscv64": {
++        "npm_name": "@openai/codex-linux-riscv64",
++        "npm_tag": "linux-riscv64",
++        "target_triple": "riscv64gc-unknown-linux-musl",
++        "os": "linux",
++        "cpu": "riscv64",
++    },
+     "codex-darwin-x64": {
+         "npm_name": "@openai/codex-darwin-x64",
+         "npm_tag": "darwin-x64",
+@@ -73,6 +80,7 @@ PACKAGE_NATIVE_COMPONENTS: dict[str, list[str]] = {
+     "codex": [],
+     "codex-linux-x64": [CODEX_PACKAGE_COMPONENT],
+     "codex-linux-arm64": [CODEX_PACKAGE_COMPONENT],
++    "codex-linux-riscv64": [CODEX_PACKAGE_COMPONENT],
+     "codex-darwin-x64": [CODEX_PACKAGE_COMPONENT],
+     "codex-darwin-arm64": [CODEX_PACKAGE_COMPONENT],
+     "codex-win32-x64": [CODEX_PACKAGE_COMPONENT],
+diff --git a/codex-rs/exec-server/testing/run_version_skew.sh b/codex-rs/exec-server/testing/run_version_skew.sh
+index f0e9536def..e94604b737 100755
+--- a/codex-rs/exec-server/testing/run_version_skew.sh
++++ b/codex-rs/exec-server/testing/run_version_skew.sh
+@@ -21,6 +21,7 @@ case "$(uname -s):$(uname -m)" in
+   Darwin:arm64) target="aarch64-apple-darwin" ;;
+   Darwin:x86_64) target="x86_64-apple-darwin" ;;
+   Linux:aarch64 | Linux:arm64) target="aarch64-unknown-linux-musl" ;;
++  Linux:riscv64) target="riscv64gc-unknown-linux-musl" ;;
+   Linux:x86_64) target="x86_64-unknown-linux-musl" ;;
+   *)
+     echo "Unsupported platform: $(uname -s) $(uname -m)" >&2
+diff --git a/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js b/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js
+index e2c3ee7d3e..b3ddf5ae57 100755
+--- a/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js
++++ b/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js
+@@ -18,6 +18,9 @@ function determineTargetTriple(platform, arch) {
+       if (arch === "arm64") {
+         return "aarch64-unknown-linux-musl";
+       }
++      if (arch === "riscv64") {
++        return "riscv64gc-unknown-linux-musl";
++      }
+       break;
+     case "darwin":
+       if (arch === "x64") {
+diff --git a/docs/riscv64-linux.md b/docs/riscv64-linux.md
+new file mode 100644
+index 0000000000..bd11f2d41c
+--- /dev/null
++++ b/docs/riscv64-linux.md
+@@ -0,0 +1,4 @@
++# RISC-V 64-bit Linux
++
++Codex supports `riscv64gc-unknown-linux-musl` for release packages. The
++release workflow cross-compiles RISC-V artifacts on an x86_64 Linux runner.
+diff --git a/scripts/codex_package/targets.py b/scripts/codex_package/targets.py
+index 016202cf5f..9734695999 100644
+--- a/scripts/codex_package/targets.py
++++ b/scripts/codex_package/targets.py
+@@ -86,6 +86,12 @@ TARGET_SPECS: dict[str, TargetSpec] = {
+         is_linux=True,
+         dotslash_platform="linux-aarch64",
+     ),
++    "riscv64gc-unknown-linux-musl": TargetSpec(
++        target="riscv64gc-unknown-linux-musl",
++        is_windows=False,
++        is_linux=True,
++        dotslash_platform="linux-riscv64",
++    ),
+     "x86_64-apple-darwin": TargetSpec(
+         target="x86_64-apple-darwin",
+         is_windows=False,
+@@ -117,6 +123,7 @@ HOST_RELEASE_TARGETS: dict[tuple[str, str], str] = {
+     ("darwin", "aarch64"): "aarch64-apple-darwin",
+     ("darwin", "x86_64"): "x86_64-apple-darwin",
+     ("linux", "aarch64"): "aarch64-unknown-linux-musl",
++    ("linux", "riscv64"): "riscv64gc-unknown-linux-musl",
+     ("linux", "x86_64"): "x86_64-unknown-linux-musl",
+     ("windows", "aarch64"): "aarch64-pc-windows-msvc",
+     ("windows", "x86_64"): "x86_64-pc-windows-msvc",
+diff --git a/scripts/codex_package/test_targets.py b/scripts/codex_package/test_targets.py
+new file mode 100644
+index 0000000000..d2d4a24ff0
+--- /dev/null
++++ b/scripts/codex_package/test_targets.py
+@@ -0,0 +1,22 @@
++import unittest
++from unittest.mock import patch
++
++from .targets import default_target
++
++
++class DefaultTargetTest(unittest.TestCase):
++    def test_riscv64_linux_defaults_to_musl_release_target(self) -> None:
++        with (
++            patch(
++                "scripts.codex_package.targets.platform.system", return_value="Linux"
++            ),
++            patch(
++                "scripts.codex_package.targets.platform.machine",
++                return_value="riscv64",
++            ),
++        ):
++            self.assertEqual(default_target(), "riscv64gc-unknown-linux-musl")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/install/install.sh b/scripts/install/install.sh
+index 9c7dfabd3d..edb741292c 100755
+--- a/scripts/install/install.sh
++++ b/scripts/install/install.sh
+@@ -1090,6 +1090,9 @@ case "$(uname -m)" in
+   arm64 | aarch64)
+     arch="aarch64"
+     ;;
++  riscv64)
++    arch="riscv64"
++    ;;
+   *)
+     echo "Unsupported architecture: $(uname -m)" >&2
+     exit 1
+@@ -1117,6 +1120,10 @@ else
+     npm_tag="linux-arm64"
+     vendor_target="aarch64-unknown-linux-musl"
+     platform_label="Linux (ARM64)"
++  elif [ "$arch" = "riscv64" ]; then
++    npm_tag="linux-riscv64"
++    vendor_target="riscv64gc-unknown-linux-musl"
++    platform_label="Linux (RISC-V 64-bit)"
+   else
+     npm_tag="linux-x64"
+     vendor_target="x86_64-unknown-linux-musl"
+diff --git a/scripts/install/test_install_sh.py b/scripts/install/test_install_sh.py
+index 02d527d608..cc5029f62e 100644
+--- a/scripts/install/test_install_sh.py
++++ b/scripts/install/test_install_sh.py
+@@ -131,6 +131,32 @@ class InstallShTest(unittest.TestCase):
+             )
+             self.assertTrue(os.access(host_path, os.X_OK))
+ 
++    def test_riscv64_linux_installs_verified_package(self) -> None:
++        with tempfile.TemporaryDirectory() as temp_dir:
++            root = Path(temp_dir)
++            target = "riscv64gc-unknown-linux-musl"
++            archive_path, checksum_path, metadata_json = create_package_release(
++                root,
++                target=target,
++            )
++
++            result, requests = run_installer_in(
++                root,
++                VERSION,
++                metadata_json=metadata_json,
++                archive_path=archive_path,
++                checksum_path=checksum_path,
++                force_riscv64_linux=True,
++            )
++
++            self.assertEqual(result.returncode, 0, result.stderr)
++            self.assertIn("Linux (RISC-V 64-bit)", result.stdout)
++            self.assertEqual(
++                requests[-1],
++                "https://github.com/openai/codex/releases/download/"
++                f"rust-v{VERSION}/codex-package-{target}.tar.gz",
++            )
++
+     def test_releases_latest_installs_verified_package_by_default(self) -> None:
+         with tempfile.TemporaryDirectory() as temp_dir:
+             root = Path(temp_dir)
+@@ -534,6 +560,7 @@ def run_installer_in(
+     releases_checksum_path: Path | None = None,
+     legacy_archive_path: Path | None = None,
+     force_macos: bool = False,
++    force_riscv64_linux: bool = False,
+     use_mirror: bool | None = False,
+     releases_mode: str = "",
+ ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+@@ -647,6 +674,17 @@ def run_installer_in(
+             encoding="utf-8",
+         )
+         fake_uname.chmod(0o755)
++    elif force_riscv64_linux:
++        fake_uname = bin_dir / "uname"
++        fake_uname.write_text(
++            "#!/bin/sh\n"
++            'case "$1" in\n'
++            "  -s) printf 'Linux\\n' ;;\n"
++            "  -m) printf 'riscv64\\n' ;;\n"
++            "esac\n",
++            encoding="utf-8",
++        )
++        fake_uname.chmod(0o755)
+ 
+     home = root / "home"
+     home.mkdir(exist_ok=True)
+@@ -706,6 +744,7 @@ def create_package_release(
+     root: Path,
+     *,
+     metadata_version: str = VERSION,
++    target: str = "aarch64-apple-darwin",
+ ) -> tuple[Path, Path, str]:
+     package_dir = root / "package"
+     (package_dir / "bin").mkdir(parents=True)
+@@ -720,8 +759,14 @@ def create_package_release(
+         "#!/bin/sh\nexit 0\n",
+     )
+     write_executable(package_dir / "codex-path" / "rg", "#!/bin/sh\nexit 0\n")
++    if "linux" in target:
++        (package_dir / "codex-resources").mkdir()
++        write_executable(
++            package_dir / "codex-resources" / "bwrap",
++            "#!/bin/sh\nexit 0\n",
++        )
+ 
+-    asset = "codex-package-aarch64-apple-darwin.tar.gz"
++    asset = f"codex-package-{target}.tar.gz"
+     archive_path = root / asset
+     with tarfile.open(archive_path, "w:gz") as archive:
+         for path in package_dir.iterdir():
+@@ -790,6 +835,7 @@ def release_metadata(*, compact: bool = False, reorder: bool = False) -> str:
+             "aarch64-apple-darwin",
+             "x86_64-apple-darwin",
+             "aarch64-unknown-linux-musl",
++            "riscv64gc-unknown-linux-musl",
+             "x86_64-unknown-linux-musl",
+         )
+     ]
+diff --git a/scripts/stage_npm_packages.py b/scripts/stage_npm_packages.py
+index 1ce9b22d01..d0a8122d73 100755
+--- a/scripts/stage_npm_packages.py
++++ b/scripts/stage_npm_packages.py
+@@ -23,6 +23,7 @@ GITHUB_REPO = "openai/codex"
+ BINARY_TARGETS = (
+     "x86_64-unknown-linux-musl",
+     "aarch64-unknown-linux-musl",
++    "riscv64gc-unknown-linux-musl",
+     "x86_64-apple-darwin",
+     "aarch64-apple-darwin",
+     "x86_64-pc-windows-msvc",
+diff --git a/sdk/python/_runtime_setup.py b/sdk/python/_runtime_setup.py
+index e3988fb795..70ece4ba5d 100644
+--- a/sdk/python/_runtime_setup.py
++++ b/sdk/python/_runtime_setup.py
+@@ -108,6 +108,8 @@ def platform_asset_name() -> str:
+     elif system == "linux":
+         if machine in {"aarch64", "arm64"}:
+             return "codex-package-aarch64-unknown-linux-musl.tar.gz"
++        if machine == "riscv64":
++            return "codex-package-riscv64gc-unknown-linux-musl.tar.gz"
+         if machine in {"x86_64", "amd64"}:
+             return "codex-package-x86_64-unknown-linux-musl.tar.gz"
+     elif system == "windows":
+diff --git a/sdk/python/tests/test_artifact_workflow_and_binaries.py b/sdk/python/tests/test_artifact_workflow_and_binaries.py
+index f62a1bfecf..446781757a 100644
+--- a/sdk/python/tests/test_artifact_workflow_and_binaries.py
++++ b/sdk/python/tests/test_artifact_workflow_and_binaries.py
+@@ -604,6 +604,11 @@ def test_runtime_setup_reads_independent_runtime_pin_and_release_tags() -> None:
+     ("system", "machine", "asset_name"),
+     [
+         ("Darwin", "arm64", "codex-package-aarch64-apple-darwin.tar.gz"),
++        (
++            "Linux",
++            "riscv64",
++            "codex-package-riscv64gc-unknown-linux-musl.tar.gz",
++        ),
+         ("Linux", "x86_64", "codex-package-x86_64-unknown-linux-musl.tar.gz"),
+         ("Windows", "AMD64", "codex-package-x86_64-pc-windows-msvc.tar.gz"),
+     ],
+diff --git a/sdk/typescript/src/exec.ts b/sdk/typescript/src/exec.ts
+index 26741bcc31..53f4707a01 100644
+--- a/sdk/typescript/src/exec.ts
++++ b/sdk/typescript/src/exec.ts
+@@ -47,6 +47,7 @@ const CODEX_NPM_NAME = "@openai/codex";
+ const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
+   "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
+   "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
++  "riscv64gc-unknown-linux-musl": "@openai/codex-linux-riscv64",
+   "x86_64-apple-darwin": "@openai/codex-darwin-x64",
+   "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
+   "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
+@@ -345,6 +346,9 @@ function findCodexPath(): CodexPathResolution {
+         case "arm64":
+           targetTriple = "aarch64-unknown-linux-musl";
+           break;
++        case "riscv64":
++          targetTriple = "riscv64gc-unknown-linux-musl";
++          break;
+         default:
+           break;
+       }

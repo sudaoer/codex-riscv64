@@ -1,0 +1,70 @@
+name: Compatibility check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out downstream inputs
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Validate downstream release tooling
+        run: |
+          python3 scripts/release.py validate
+          python3 -m unittest discover -s tests -v
+
+      - name: Reconstruct exact patched source
+        run: |
+          python3 scripts/release.py prepare \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --report "${RUNNER_TEMP}/source-info.json"
+
+      - name: Run focused upstream package and V8 tests
+        working-directory: ${{ runner.temp }}/source
+        run: |
+          python3 .github/scripts/test_rusty_v8_bazel.py
+          python3 -m unittest \
+            scripts.codex_package.test_archive \
+            scripts.codex_package.test_cargo \
+            scripts.codex_package.test_layout \
+            scripts.codex_package.test_targets \
+            scripts.codex_package.test_zsh \
+            -v
+
+      - name: Check Cargo workspace metadata
+        working-directory: ${{ runner.temp }}/source/codex-rs
+        run: cargo metadata --locked --format-version 1 --no-deps >/dev/null
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.28.1
+          bazelisk-cache: true
+          repository-cache: true
+          module-root: ${{ runner.temp }}/source
+
+      - name: Check the RISC-V V8 release target
+        working-directory: ${{ runner.temp }}/source
+        run: |
+          bazel query \
+            //third_party/v8:rusty_v8_sandbox_release_pair_riscv64gc_unknown_linux_musl

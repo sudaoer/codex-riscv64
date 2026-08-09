@@ -1,0 +1,124 @@
+name: Candidate build
+
+on:
+  workflow_run:
+    workflows: ["Compatibility check"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Resolve candidate source revision
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            echo "sha=$WORKFLOW_RUN_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out exact downstream inputs
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve pinned release policy
+        id: policy
+        run: python3 scripts/release.py validate
+
+      - name: Reconstruct exact patched source
+        run: |
+          python3 scripts/release.py prepare \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --report "${RUNNER_TEMP}/source-info.json"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: ${{ steps.policy.outputs.rust }}
+          targets: ${{ steps.policy.outputs.target }}
+
+      - name: Use a hermetic Cargo home
+        run: |
+          cargo_home="${RUNNER_TEMP}/cargo-home"
+          mkdir -p "$cargo_home/bin"
+          : >"$cargo_home/config.toml"
+          echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
+          echo "$cargo_home/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.policy.outputs.zig }}
+          use-cache: false
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.28.1
+          bazelisk-cache: true
+          repository-cache: true
+          module-root: ${{ runner.temp }}/source
+
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils llvm pkg-config libcap-dev zstd
+
+      - name: Install upstream musl build tools
+        env:
+          TARGET: riscv64gc-unknown-linux-musl
+        run: bash "${RUNNER_TEMP}/source/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Build and seal candidate
+        env:
+          GITHUB_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          bash scripts/build_candidate.sh \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --source-info "${RUNNER_TEMP}/source-info.json" \
+            --candidate-dir "${GITHUB_WORKSPACE}/candidate"
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: candidate/*
+
+      - name: Upload immutable candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-riscv64-candidate
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

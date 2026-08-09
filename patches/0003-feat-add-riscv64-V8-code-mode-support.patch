@@ -1,0 +1,393 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sudoer-wsl-ub2604 <ub2604@sudoer.cn>
+Date: Sat, 8 Aug 2026 23:19:33 +0800
+Subject: [PATCH 3/3] feat: add riscv64 V8 code-mode support
+
+---
+ .bazelrc                               |   4 +
+ MODULE.bazel                           |   2 +
+ docs/riscv64-linux.md                  |  26 +++++
+ patches/BUILD.bazel                    |   1 +
+ patches/v8_riscv64_bazel_sources.patch | 138 +++++++++++++++++++++++++
+ third_party/v8/BUILD.bazel             |  66 ++++++++++++
+ third_party/v8/README.md               |   1 +
+ third_party/v8/v8_crate.BUILD.bazel    |   5 +
+ 8 files changed, 243 insertions(+)
+ create mode 100644 patches/v8_riscv64_bazel_sources.patch
+
+diff --git a/.bazelrc b/.bazelrc
+index 0736ecbb6e..6d3387cad4 100644
+--- a/.bazelrc
++++ b/.bazelrc
+@@ -215,6 +215,10 @@ common:v8-release-compat --@v8//:v8_enable_pointer_compression=False
+ common:v8-release-compat --@v8//:v8_enable_sandbox=False
+ common:v8-target-x64 --@v8//bazel/config:v8_target_cpu=x64
+ common:v8-target-arm64 --@v8//bazel/config:v8_target_cpu=arm64
++common:v8-target-riscv64 --@v8//bazel/config:v8_target_cpu=riscv64
++# Preserve the rv64gc baseline. Highway otherwise enables its RVV runtime
++# dispatch path on every RISC-V build, even when the compiler target lacks V.
++common:v8-target-riscv64 --copt=-DHWY_DISABLED_TARGETS=HWY_RVV
+ 
+ # Match rusty_v8's upstream GN release contract for published artifacts: every
+ # target object uses Chromium's custom libc++ headers and the archive folds in
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 5244d5b2ba..f7a01522af 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -399,6 +399,7 @@ crate.annotation(
+         "aarch64-pc-windows-msvc": ["v8_enable_sandbox"],
+         "aarch64-unknown-linux-gnu": ["v8_enable_sandbox"],
+         "aarch64-unknown-linux-musl": ["v8_enable_sandbox"],
++        "riscv64gc-unknown-linux-musl": ["v8_enable_sandbox"],
+         "x86_64-apple-darwin": ["v8_enable_sandbox"],
+         "x86_64-pc-windows-gnullvm": ["v8_enable_sandbox"],
+         "x86_64-pc-windows-msvc": ["v8_enable_sandbox"],
+@@ -482,6 +483,7 @@ archive_override(
+         "//patches:v8_module_deps.patch",
+         "//patches:v8_bazel_rules.patch",
+         "//patches:v8_source_portability.patch",
++        "//patches:v8_riscv64_bazel_sources.patch",
+     ],
+     strip_prefix = "v8-15.0.245.2",
+     urls = ["https://github.com/v8/v8/archive/refs/tags/15.0.245.2.tar.gz"],
+diff --git a/docs/riscv64-linux.md b/docs/riscv64-linux.md
+index bd11f2d41c..af1516cd40 100644
+--- a/docs/riscv64-linux.md
++++ b/docs/riscv64-linux.md
+@@ -2,3 +2,29 @@
+ 
+ Codex supports `riscv64gc-unknown-linux-musl` for release packages. The
+ release workflow cross-compiles RISC-V artifacts on an x86_64 Linux runner.
++
++## Code mode and V8
++
++Code mode uses Codex-built `rusty_v8` artifacts. Before publishing a Codex
++release, run the `rusty-v8-release` workflow for the RISC-V musl target and
++both `release` and `ptrcomp-sandbox` variants. The normal Codex release
++consumes the `ptrcomp-sandbox` musl pair.
++
++V8 requests a 128 GiB sandbox reservation on RISC-V. A Sv39 kernel cannot
++reserve the full ideal address space, so V8 falls back to a partially reserved
++sandbox. Code mode remains enabled, but its address-space isolation is weaker
++than on a host that can reserve the complete V8 sandbox. This is an accepted
++platform limitation, not a silent change to the code-mode feature set.
++
++The V8 build disables Highway's optional RVV runtime-dispatch path so the
++published binary keeps the Rust target's `rv64gc` baseline and does not require
++the V extension. This affects SIMD acceleration in Highway users, not V8's
++RISC-V JIT support.
++
++## Release package contents
++
++The primary RISC-V musl package contains `codex`, `codex-code-mode-host`, a
++target-built `bwrap`, and a target-built `rg`. The
++`codex-responses-api-proxy` is published as its own static RISC-V artifact.
++The patched zsh resource is optional; it is included only after a
++`linux-riscv64` artifact is present in the selected zsh DotSlash manifest.
+diff --git a/patches/BUILD.bazel b/patches/BUILD.bazel
+index 81bc6d4efb..3f71ad26e8 100644
+--- a/patches/BUILD.bazel
++++ b/patches/BUILD.bazel
+@@ -13,6 +13,7 @@ exports_files([
+     "ring_windows_msvc_include_dirs.patch",
+     "v8_bazel_rules.patch",
+     "v8_module_deps.patch",
++    "v8_riscv64_bazel_sources.patch",
+     "v8_source_portability.patch",
+     "webrtc-sys_hermetic_darwin_sysroot.patch",
+     "windows-link.patch",
+diff --git a/patches/v8_riscv64_bazel_sources.patch b/patches/v8_riscv64_bazel_sources.patch
+new file mode 100644
+index 0000000000..8a647eb92b
+--- /dev/null
++++ b/patches/v8_riscv64_bazel_sources.patch
+@@ -0,0 +1,138 @@
++# What: synchronize V8's RISC-V Bazel source list with its GN build.
++# Scope: BUILD.bazel metadata only. The stale extension-riscv-inl.h entry is
++# absent from the 15.0.245.2 archive, while several current implementation and
++# extension and compiler backend headers are present in BUILD.gn but missing
++# from BUILD.bazel. The RISC-V push-register assembly also moved from the
++# obsolete riscv64 directory to riscv, and x64-hosted RISC-V snapshot tools
++# need the trap-handler simulator sources.
++
++diff --git a/orig/v8-15.0.245.2/BUILD.bazel b/mod/v8-15.0.245.2/BUILD.bazel
++index ea3a791..4745cb9 100644
++--- a/orig/v8-15.0.245.2/BUILD.bazel
+++++ b/mod/v8-15.0.245.2/BUILD.bazel
++@@ -2908,9 +2908,13 @@ filegroup(
++             "src/baseline/riscv/baseline-assembler-riscv-inl.h",
++             "src/baseline/riscv/baseline-compiler-riscv-inl.h",
+++            "src/codegen/riscv/assembler-riscv.cc",
++             "src/codegen/riscv/assembler-riscv-inl.h",
++             "src/codegen/riscv/assembler-riscv.h",
+++            "src/codegen/riscv/base-assembler-riscv.cc",
++             "src/codegen/riscv/base-assembler-riscv.h",
+++            "src/codegen/riscv/base-constants-riscv.cc",
++             "src/codegen/riscv/base-constants-riscv.h",
+++            "src/codegen/riscv/base-riscv-i.cc",
++             "src/codegen/riscv/base-riscv-i.h",
++             "src/codegen/riscv/constant-pool-riscv.cc",
++             "src/codegen/riscv/constant-pool-riscv.h",
++@@ -2920,26 +2924,44 @@ filegroup(
++             "src/codegen/riscv/constant-riscv-d.h",
++             "src/codegen/riscv/constant-riscv-f.h",
+++            "src/codegen/riscv/constant-riscv-i.h",
++             "src/codegen/riscv/constant-riscv-m.h",
++             "src/codegen/riscv/constant-riscv-v.h",
++             "src/codegen/riscv/constant-riscv-zfa.h",
+++            "src/codegen/riscv/constant-riscv-zfh.h",
+++            "src/codegen/riscv/constant-riscv-zicond.h",
++             "src/codegen/riscv/constant-riscv-zicsr.h",
++             "src/codegen/riscv/constant-riscv-zifencei.h",
+++            "src/codegen/riscv/constant-riscv-zimop.h",
++             "src/codegen/riscv/constants-riscv.h",
+++            "src/codegen/riscv/cpu-riscv.cc",
+++            "src/codegen/riscv/extension-riscv-a.cc",
++             "src/codegen/riscv/extension-riscv-a.h",
+++            "src/codegen/riscv/extension-riscv-b.cc",
++             "src/codegen/riscv/extension-riscv-b.h",
+++            "src/codegen/riscv/extension-riscv-c.cc",
++             "src/codegen/riscv/extension-riscv-c.h",
+++            "src/codegen/riscv/extension-riscv-d.cc",
++             "src/codegen/riscv/extension-riscv-d.h",
+++            "src/codegen/riscv/extension-riscv-f.cc",
++             "src/codegen/riscv/extension-riscv-f.h",
++-            "src/codegen/riscv/extension-riscv-inl.h",
+++            "src/codegen/riscv/extension-riscv-m.cc",
++             "src/codegen/riscv/extension-riscv-m.h",
+++            "src/codegen/riscv/extension-riscv-v.cc",
++             "src/codegen/riscv/extension-riscv-v.h",
++             "src/codegen/riscv/extension-riscv-zfa.cc",
++             "src/codegen/riscv/extension-riscv-zfa.h",
+++            "src/codegen/riscv/extension-riscv-zfh.cc",
+++            "src/codegen/riscv/extension-riscv-zfh.h",
+++            "src/codegen/riscv/extension-riscv-zicond.cc",
+++            "src/codegen/riscv/extension-riscv-zicond.h",
+++            "src/codegen/riscv/extension-riscv-zicsr.cc",
++             "src/codegen/riscv/extension-riscv-zicsr.h",
+++            "src/codegen/riscv/extension-riscv-zifencei.cc",
++             "src/codegen/riscv/extension-riscv-zifencei.h",
++             "src/codegen/riscv/extension-riscv-zimop.cc",
++             "src/codegen/riscv/extension-riscv-zimop.h",
++             "src/codegen/riscv/interface-descriptors-riscv-inl.h",
+++            "src/codegen/riscv/macro-assembler-riscv.cc",
++             "src/codegen/riscv/macro-assembler-riscv.h",
++             "src/codegen/riscv/register-riscv.h",
++             "src/codegen/riscv/reglist-riscv.h",
++@@ -3003,7 +3025,11 @@ filegroup(
++     }) + select({
++         "@v8//bazel/config:v8_arm64_simulator": [
++             "src/trap-handler/handler-outside-simulator.cc",
++             "src/trap-handler/trap-handler-simulator.h",
++         ],
+++        "@v8//bazel/config:v8_riscv64_simulator": [
+++            "src/trap-handler/handler-outside-simulator.cc",
+++            "src/trap-handler/trap-handler-simulator.h",
+++        ],
++         "//conditions:default": [],
++     }) + select({
++@@ -3768,7 +3794,9 @@ filegroup(
++             "src/compiler/backend/riscv/code-generator-riscv.cc",
++             "src/compiler/backend/riscv/instruction-codes-riscv.h",
++             "src/compiler/backend/riscv/instruction-scheduler-riscv.cc",
+++            "src/compiler/backend/riscv/instruction-selector-riscv.h",
++             "src/compiler/backend/riscv/instruction-selector-riscv64.cc",
+++            "src/compiler/backend/riscv/register-constraints-riscv.h",
++         ],
++         "@v8//bazel/config:v8_target_ppc64le": [
++             "src/compiler/backend/ppc/code-generator-ppc.cc",
++@@ -3879,6 +3907,8 @@ filegroup(
++             "src/maglev/maglev-phi-representation-selector.cc",
++             "src/maglev/maglev-phi-representation-selector.h",
++             "src/maglev/maglev-tracer.h",
+++            "src/maglev/maglev-map-inference.h",
+++            "src/maglev/maglev-regalloc-node-info.h",
++             "src/maglev/maglev-truncation.cc",
++             "src/maglev/maglev-truncation.h",
++             "src/maglev/maglev-post-hoc-optimizations-processors.h",
++@@ -4136,7 +4166,7 @@ filegroup(
++         "@v8//bazel/config:is_inline_asm_arm": ["src/heap/base/asm/arm/push_registers_asm.cc"],
++         "@v8//bazel/config:is_inline_asm_arm64": ["src/heap/base/asm/arm64/push_registers_asm.cc"],
++         "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/push_registers_asm.cc"],
++-        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/push_registers_asm.cc"],
+++        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv/push_registers_asm.cc"],
++         "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/push_registers_asm.cc"],
++         "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/push_registers_asm.cc"],
++         "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/push_registers_masm.asm"],
++
++diff --git a/orig/v8-15.0.245.2/bazel/config/BUILD.bazel b/mod/v8-15.0.245.2/bazel/config/BUILD.bazel
++index e4d8c31..fb138b9 100644
++--- a/orig/v8-15.0.245.2/bazel/config/BUILD.bazel
+++++ b/mod/v8-15.0.245.2/bazel/config/BUILD.bazel
++@@ -137,11 +137,20 @@ selects.config_setting_group(
++ # Running arm64 simulator on x64 host.
++ selects.config_setting_group(
++     name = "v8_arm64_simulator",
++     match_all = [
++         ":v8_target_arm64",
++         ":is_x64",
++     ],
++ )
++
+++# Running the riscv64 simulator on an x64 host.
+++selects.config_setting_group(
+++    name = "v8_riscv64_simulator",
+++    match_all = [
+++        ":v8_target_riscv64",
+++        ":is_x64",
+++    ],
+++)
+++
++ config_setting(
++     name = "is_linux",
+diff --git a/third_party/v8/BUILD.bazel b/third_party/v8/BUILD.bazel
+index d874bce0e0..e49322551f 100644
+--- a/third_party/v8/BUILD.bazel
++++ b/third_party/v8/BUILD.bazel
+@@ -22,6 +22,15 @@ config_setting(
+     ],
+ )
+ 
++config_setting(
++    name = "platform_riscv64gc_unknown_linux_musl",
++    constraint_values = [
++        "@platforms//cpu:riscv64",
++        "@platforms//os:linux",
++        "@llvm//constraints/libc:musl",
++    ],
++)
++
+ config_setting(
+     name = "use_rusty_v8_custom_libcxx",
+     flag_values = {
+@@ -74,6 +83,7 @@ alias(
+         "@rules_rs//rs/platforms/config:aarch64-pc-windows-msvc": ":v8_150_4_0_aarch64_pc_windows_msvc",
+         "@rules_rs//rs/platforms/config:aarch64-unknown-linux-gnu": ":v8_150_4_0_aarch64_unknown_linux_gnu_bazel",
+         ":platform_aarch64_unknown_linux_musl": ":v8_150_4_0_aarch64_unknown_linux_musl_release_base",
++        ":platform_riscv64gc_unknown_linux_musl": ":v8_150_4_0_riscv64gc_unknown_linux_musl_release_base",
+         "@rules_rs//rs/platforms/config:x86_64-apple-darwin": ":v8_150_4_0_x86_64_apple_darwin_bazel",
+         "@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": ":v8_150_4_0_x86_64_pc_windows_gnullvm",
+         "@rules_rs//rs/platforms/config:x86_64-pc-windows-msvc": ":v8_150_4_0_x86_64_pc_windows_msvc",
+@@ -91,6 +101,7 @@ alias(
+         "@rules_rs//rs/platforms/config:aarch64-pc-windows-msvc": ":src_binding_release_aarch64_pc_windows_msvc_150_4_0_release",
+         "@rules_rs//rs/platforms/config:aarch64-unknown-linux-gnu": ":src_binding_release_aarch64_unknown_linux_gnu_150_4_0_release",
+         ":platform_aarch64_unknown_linux_musl": ":src_binding_release_aarch64_unknown_linux_musl_150_4_0_release",
++        ":platform_riscv64gc_unknown_linux_musl": ":src_binding_release_riscv64gc_unknown_linux_musl_150_4_0_release",
+         "@rules_rs//rs/platforms/config:x86_64-apple-darwin": ":src_binding_release_x86_64_apple_darwin_150_4_0_release",
+         "@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": ":src_binding_release_x86_64_pc_windows_gnullvm_150_4_0_release",
+         "@rules_rs//rs/platforms/config:x86_64-pc-windows-msvc": ":src_binding_release_x86_64_pc_windows_msvc_150_4_0_release",
+@@ -127,6 +138,7 @@ cc_library(
+     name = "rusty_v8_custom_libcxx_headers",
+     defines = select({
+         ":platform_aarch64_unknown_linux_musl": ["ANDROID_HOST_MUSL"],
++        ":platform_riscv64gc_unknown_linux_musl": ["ANDROID_HOST_MUSL"],
+         ":platform_x86_64_unknown_linux_musl": ["ANDROID_HOST_MUSL"],
+         "//conditions:default": [],
+     }),
+@@ -295,6 +307,39 @@ cc_static_library(
+     ],
+ )
+ 
++cc_static_library(
++    name = "v8_150_4_0_riscv64gc_unknown_linux_musl_release_base",
++    features = V8_STATIC_LIBRARY_FEATURES,
++    deps = [
++        ":rusty_v8_custom_libcxx_runtime",
++        ":v8_150_4_0_binding",
++    ],
++)
++
++genrule(
++    name = "v8_150_4_0_riscv64gc_unknown_linux_musl_release",
++    srcs = [
++        ":v8_150_4_0_riscv64gc_unknown_linux_musl_release_base",
++        "@llvm//runtimes/compiler-rt:clang_rt.builtins.static",
++    ],
++    outs = ["libv8_150_4_0_riscv64gc_unknown_linux_musl.a"],
++    cmd = """
++      cat > "$(@D)/merge-riscv64.mri" <<'EOF'
++create $@
++addlib $(location :v8_150_4_0_riscv64gc_unknown_linux_musl_release_base)
++addlib $(location @llvm//runtimes/compiler-rt:clang_rt.builtins.static)
++save
++end
++EOF
++      $(location @llvm//tools:llvm-ar) -M < "$(@D)/merge-riscv64.mri"
++      $(location @llvm//tools:llvm-ranlib) "$@"
++    """,
++    tools = [
++        "@llvm//tools:llvm-ar",
++        "@llvm//tools:llvm-ranlib",
++    ],
++)
++
+ filegroup(
+     name = "src_binding_release_aarch64_apple_darwin_150_4_0_release",
+     srcs = ["@v8_crate_150_4_0//:src_binding_release_aarch64_apple_darwin"],
+@@ -325,6 +370,11 @@ filegroup(
+     srcs = ["@v8_crate_150_4_0//:src_binding_release_x86_64_unknown_linux_gnu"],
+ )
+ 
++filegroup(
++    name = "src_binding_release_riscv64gc_unknown_linux_musl_150_4_0_release",
++    srcs = ["@v8_crate_150_4_0//:src_binding_release_riscv64gc_unknown_linux_musl"],
++)
++
+ filegroup(
+     name = "src_binding_release_aarch64_pc_windows_msvc_150_4_0_release",
+     srcs = ["@v8_crate_150_4_0//:src_binding_release_aarch64_pc_windows_msvc"],
+@@ -383,6 +433,14 @@ filegroup(
+     ],
+ )
+ 
++filegroup(
++    name = "rusty_v8_release_pair_riscv64gc_unknown_linux_musl",
++    srcs = [
++        ":src_binding_release_riscv64gc_unknown_linux_musl_150_4_0_release",
++        ":v8_150_4_0_riscv64gc_unknown_linux_musl_release",
++    ],
++)
++
+ filegroup(
+     name = "rusty_v8_release_pair_x86_64_pc_windows_msvc",
+     srcs = [
+@@ -446,3 +504,11 @@ filegroup(
+         ":v8_150_4_0_aarch64_unknown_linux_musl_release",
+     ],
+ )
++
++filegroup(
++    name = "rusty_v8_sandbox_release_pair_riscv64gc_unknown_linux_musl",
++    srcs = [
++        ":src_binding_release_riscv64gc_unknown_linux_musl_150_4_0_release",
++        ":v8_150_4_0_riscv64gc_unknown_linux_musl_release",
++    ],
++)
+diff --git a/third_party/v8/README.md b/third_party/v8/README.md
+index 21adf3899d..c542a6039f 100644
+--- a/third_party/v8/README.md
++++ b/third_party/v8/README.md
+@@ -76,6 +76,7 @@ Tagged runs build release artifacts from the Bazel graph itself:
+ - `//third_party/v8:rusty_v8_release_pair_aarch64_unknown_linux_gnu`
+ - `//third_party/v8:rusty_v8_release_pair_x86_64_unknown_linux_musl`
+ - `//third_party/v8:rusty_v8_release_pair_aarch64_unknown_linux_musl`
++- `//third_party/v8:rusty_v8_release_pair_riscv64gc_unknown_linux_musl`
+ 
+ The same run also builds the matching sandbox pair targets:
+ 
+diff --git a/third_party/v8/v8_crate.BUILD.bazel b/third_party/v8/v8_crate.BUILD.bazel
+index 3988bc0345..baedb20406 100644
+--- a/third_party/v8/v8_crate.BUILD.bazel
++++ b/third_party/v8/v8_crate.BUILD.bazel
+@@ -35,6 +35,11 @@ filegroup(
+     srcs = ["gen/src_binding_release_x86_64-unknown-linux-gnu.rs"],
+ )
+ 
++filegroup(
++    name = "src_binding_release_riscv64gc_unknown_linux_musl",
++    srcs = ["gen/src_binding_release_riscv64gc-unknown-linux-gnu.rs"],
++)
++
+ filegroup(
+     name = "src_binding_release_x86_64_pc_windows_msvc",
+     srcs = ["gen/src_binding_release_x86_64-pc-windows-msvc.rs"],
