@@ -1,0 +1,259 @@
+name: V8 build
+
+on:
+  workflow_run:
+    workflows: ["Compatibility check"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      bootstrap_candidate_run_id:
+        description: "Successful legacy Candidate run used only to seed a missing V8 release"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v8-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Resolve V8 source revision
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            echo "sha=$WORKFLOW_RUN_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out exact downstream inputs
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve pinned release policy
+        run: python3 scripts/release.py validate
+
+      - name: Reconstruct exact patched source
+        run: |
+          python3 scripts/release.py prepare \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --report "${RUNNER_TEMP}/source-info.json"
+
+      - name: Resolve immutable V8 identity
+        id: v8
+        run: python3 scripts/release.py v8-key --source-dir "${RUNNER_TEMP}/source"
+
+      - name: Resolve optional bootstrap candidate
+        id: bootstrap
+        env:
+          DISPATCH_RUN_ID: ${{ inputs.bootstrap_candidate_run_id }}
+          REPOSITORY_RUN_ID: ${{ vars.V8_BOOTSTRAP_CANDIDATE_RUN_ID }}
+        run: |
+          run_id="${DISPATCH_RUN_ID:-$REPOSITORY_RUN_ID}"
+          if [[ -n "$run_id" && ! "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "Bootstrap candidate run ID must be numeric" >&2
+            exit 1
+          fi
+          echo "candidate_run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve immutable V8 release
+        id: cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V8_TAG: ${{ steps.v8.outputs.v8_release_tag }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/v8"
+          if gh release view "$V8_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            state="$(gh release view "$V8_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease \
+              --jq '[.isDraft, .isPrerelease] | @tsv')"
+            if [[ "$state" != $'false\ttrue' ]]; then
+              echo "Existing V8 release must be a published prerelease" >&2
+              exit 1
+            fi
+            gh release download "$V8_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "${RUNNER_TEMP}/v8"
+            python3 scripts/release.py validate-v8 \
+              --source-dir "${RUNNER_TEMP}/source" \
+              --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bootstrap from successful legacy candidate
+        if: >-
+          steps.cache.outputs.hit == 'false' &&
+          steps.bootstrap.outputs.candidate_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ steps.bootstrap.outputs.candidate_run_id }}
+          V8_ARCHIVE: ${{ steps.v8.outputs.v8_archive }}
+          V8_BINDING: ${{ steps.v8.outputs.v8_binding }}
+          V8_CHECKSUMS: ${{ steps.v8.outputs.v8_checksums }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/bootstrap/candidate"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
+            >"${RUNNER_TEMP}/bootstrap/run.json"
+          gh run download "$CANDIDATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name codex-riscv64-candidate \
+            --dir "${RUNNER_TEMP}/bootstrap/candidate"
+          python3 scripts/release.py validate-run \
+            --run-json "${RUNNER_TEMP}/bootstrap/run.json" \
+            --candidate-dir "${RUNNER_TEMP}/bootstrap/candidate" \
+            --run-id "$CANDIDATE_RUN_ID" >/dev/null
+          candidate_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1]))["candidate_head_sha"])' \
+            "${RUNNER_TEMP}/bootstrap/candidate/candidate.json")"
+          for name in "$V8_ARCHIVE" "$V8_BINDING" "$V8_CHECKSUMS"; do
+            gh attestation verify "${RUNNER_TEMP}/bootstrap/candidate/${name}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/candidate-build.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$candidate_sha" >/dev/null
+            cp "${RUNNER_TEMP}/bootstrap/candidate/${name}" "${RUNNER_TEMP}/v8/${name}"
+          done
+          python3 scripts/release.py finalize-v8 \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --v8-dir "${RUNNER_TEMP}/v8" \
+            --run-id "$GITHUB_RUN_ID" \
+            --head-sha "$GITHUB_SHA" \
+            --source-kind bootstrap \
+            --bootstrap-candidate-run-id "$CANDIDATE_RUN_ID"
+
+      - name: Set up Bazel
+        if: >-
+          steps.cache.outputs.hit == 'false' &&
+          steps.bootstrap.outputs.candidate_run_id == ''
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: ${{ steps.v8.outputs.bazelisk }}
+          bazelisk-cache: true
+          repository-cache: true
+          module-root: ${{ runner.temp }}/source
+
+      - name: Install V8 build prerequisites
+        if: >-
+          steps.cache.outputs.hit == 'false' &&
+          steps.bootstrap.outputs.candidate_run_id == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils llvm pkg-config libcap-dev zstd
+
+      - name: Build and seal V8
+        if: >-
+          steps.cache.outputs.hit == 'false' &&
+          steps.bootstrap.outputs.candidate_run_id == ''
+        run: |
+          bash scripts/build_v8.sh \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --v8-dir "${RUNNER_TEMP}/v8"
+
+      - name: Verify resolved V8 bytes
+        run: |
+          python3 scripts/release.py validate-v8 \
+            --source-dir "${RUNNER_TEMP}/source" \
+            --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
+
+      - name: Generate V8 build provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/v8/*
+
+      - name: Publish immutable V8 release
+        if: steps.cache.outputs.hit == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V8_TAG: ${{ steps.v8.outputs.v8_release_tag }}
+          V8_INPUT_SHA256: ${{ steps.v8.outputs.v8_input_sha256 }}
+          V8_VERSION: ${{ steps.v8.outputs.rusty_v8 }}
+          V8_HEAD_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          gh release create "$V8_TAG" "${RUNNER_TEMP}"/v8/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$V8_HEAD_SHA" \
+            --title "rusty_v8 ${V8_VERSION} for Linux/riscv64" \
+            --notes "Immutable V8 input SHA-256: ${V8_INPUT_SHA256}" \
+            --prerelease \
+            --latest=false
+
+      - name: Verify V8 attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          builder_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1]))["builder"]["head_sha"])' \
+            "${RUNNER_TEMP}/v8/v8-build.json")"
+          for path in "${RUNNER_TEMP}"/v8/*; do
+            gh attestation verify "$path" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/v8-build.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$builder_sha" >/dev/null
+          done
+
+      - name: Seal Candidate handoff
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          V8_TAG: ${{ steps.v8.outputs.v8_release_tag }}
+          V8_INPUT_SHA256: ${{ steps.v8.outputs.v8_input_sha256 }}
+        run: |
+          mkdir -p handoff
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          handoff = {
+              "schema_version": 1,
+              "v8_run_id": os.environ["GITHUB_RUN_ID"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "v8_release_tag": os.environ["V8_TAG"],
+              "v8_input_sha256": os.environ["V8_INPUT_SHA256"],
+          }
+          Path("handoff/v8-handoff.json").write_text(
+              json.dumps(handoff, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+      - name: Upload Candidate handoff
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-riscv64-v8-handoff
+          path: handoff/v8-handoff.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

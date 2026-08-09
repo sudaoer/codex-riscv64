@@ -3,14 +3,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: build_candidate.sh --source-dir DIR --candidate-dir DIR --source-info FILE
+Usage: build_candidate.sh --source-dir DIR --v8-dir DIR --candidate-dir DIR --source-info FILE
 
 Builds and seals the stable riscv64gc-unknown-linux-musl release candidate.
-The upstream musl setup step must already have exported its GITHUB_ENV values.
+The V8 release pair must already be downloaded and attestation-verified. The
+upstream musl setup step must already have exported its GITHUB_ENV values.
 EOF
 }
 
 source_dir=""
+v8_dir=""
 candidate_dir=""
 source_info=""
 while [[ $# -gt 0 ]]; do
@@ -21,6 +23,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --candidate-dir)
       candidate_dir="${2:?--candidate-dir requires a value}"
+      shift 2
+      ;;
+    --v8-dir)
+      v8_dir="${2:?--v8-dir requires a value}"
       shift 2
       ;;
     --source-info)
@@ -39,7 +45,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$source_dir" || -z "$candidate_dir" || -z "$source_info" ]]; then
+if [[ -z "$source_dir" || -z "$v8_dir" || -z "$candidate_dir" || -z "$source_info" ]]; then
   usage >&2
   exit 2
 fi
@@ -51,6 +57,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$(cd "$source_dir" && pwd)"
+v8_dir="$(cd "$v8_dir" && pwd)"
 source_info="$(cd "$(dirname "$source_info")" && pwd)/$(basename "$source_info")"
 mkdir -p "$candidate_dir"
 candidate_dir="$(cd "$candidate_dir" && pwd)"
@@ -59,29 +66,17 @@ if [[ -n "$(find "$candidate_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; the
   exit 1
 fi
 target="riscv64gc-unknown-linux-musl"
-target_suffix="${target//-/_}"
 release_dir="$source_dir/codex-rs/target/$target/release"
 v8_archive="$candidate_dir/librusty_v8_ptrcomp_sandbox_release_${target}.a.gz"
 v8_binding="$candidate_dir/src_binding_ptrcomp_sandbox_release_${target}.rs"
 v8_checksums="$candidate_dir/rusty_v8_ptrcomp_sandbox_release_${target}.sha256"
 
-cd "$source_dir"
-python3 .github/scripts/run_bazel_with_buildbuddy.py \
-  --noexperimental_remote_repo_contents_cache \
-  build -c opt \
-  --platforms=@llvm//platforms:linux_riscv64_musl \
-  --config=rusty-v8-upstream-libcxx \
-  --config=v8-target-riscv64 \
-  "//third_party/v8:rusty_v8_sandbox_release_pair_${target_suffix}" \
-  "--build_metadata=COMMIT_SHA=$(git rev-parse HEAD)"
-python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
-  --platform linux_riscv64_musl \
-  --target "$target" \
-  --compilation-mode opt \
-  --output-dir "$candidate_dir" \
-  --bazel-config v8-target-riscv64 \
-  --sandbox
-(cd "$candidate_dir" && sha256sum -c "$(basename "$v8_checksums")")
+python3 "$repo_root/scripts/release.py" validate-v8 \
+  --source-dir "$source_dir" \
+  --v8-dir "$v8_dir" >/dev/null
+cp "$v8_dir/$(basename "$v8_archive")" "$v8_archive"
+cp "$v8_dir/$(basename "$v8_binding")" "$v8_binding"
+cp "$v8_dir/$(basename "$v8_checksums")" "$v8_checksums"
 export RUSTY_V8_ARCHIVE="$v8_archive"
 export RUSTY_V8_SRC_BINDING_PATH="$v8_binding"
 export AWS_LC_SYS_NO_JITTER_ENTROPY=1
@@ -156,6 +151,7 @@ python3 "$repo_root/scripts/release.py" sbom \
 python3 "$repo_root/scripts/release.py" build-info \
   --source-info "$source_info" \
   --source-dir "$source_dir" \
+  --v8-build "$v8_dir/v8-build.json" \
   --output "$candidate_dir/build-info.json"
 python3 "$repo_root/scripts/release.py" finalize-candidate \
   --candidate-dir "$candidate_dir" \

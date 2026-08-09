@@ -22,6 +22,31 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET = "riscv64gc-unknown-linux-musl"
 SCHEMA_VERSION = 1
 CANDIDATE_WORKFLOW_PATH = ".github/workflows/candidate-build.yml"
+V8_WORKFLOW_PATH = ".github/workflows/v8-build.yml"
+# Bump this whenever the V8 build command or its non-source environment changes.
+V8_BUILDER_REVISION = 1
+V8_BAZELISK_VERSION = "1.28.1"
+V8_RUNNER_IMAGE = "ubuntu-24.04"
+V8_PLATFORM = "linux_riscv64_musl"
+V8_COMPILATION_MODE = "opt"
+V8_BAZEL_CONFIGS = (
+    "rusty-v8-upstream-libcxx",
+    "v8-target-riscv64",
+)
+V8_INPUT_FILES = (
+    ".bazelversion",
+    ".bazelrc",
+    "BUILD.bazel",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    ".github/scripts/run_bazel_with_buildbuddy.py",
+    ".github/scripts/rusty_v8_bazel.py",
+    ".github/scripts/rusty_v8_module_bazel.py",
+)
+V8_INPUT_DIRECTORIES = (
+    "patches",
+    "third_party/v8",
+)
 REQUIRED_K3_TESTS = (
     "installer",
     "codex-version",
@@ -534,6 +559,243 @@ def sha256_file(path: Path) -> str:
 
 def asset_record(path: Path) -> dict[str, Any]:
     return {"sha256": sha256_file(path), "size": path.stat().st_size}
+
+
+def v8_artifact_names(manifest: Manifest) -> tuple[str, str, str, str]:
+    target = manifest.distribution.target
+    profile = manifest.policy.v8_profile
+    return (
+        f"librusty_v8_{profile}_{target}.a.gz",
+        f"src_binding_{profile}_{target}.rs",
+        f"rusty_v8_{profile}_{target}.sha256",
+        "v8-build.json",
+    )
+
+
+def _v8_lock_record(manifest: Manifest, source_dir: Path) -> dict[str, str]:
+    # The rest of Cargo.lock drives the Codex build, not the Bazel V8 pair. By
+    # extracting this record, Codex-only dependency churn can reuse exact V8 bytes.
+    lock_path = source_dir / "codex-rs" / "Cargo.lock"
+    try:
+        lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ReleaseError(f"cannot read V8 Cargo lock record: {error}") from error
+    packages = [
+        package
+        for package in lock.get("package", [])
+        if isinstance(package, dict) and package.get("name") == "v8"
+    ]
+    if len(packages) != 1:
+        raise ReleaseError(f"expected one V8 Cargo lock record, got {len(packages)}")
+    package = packages[0]
+    version = package.get("version")
+    checksum = package.get("checksum")
+    source = package.get("source")
+    if version != manifest.toolchain.rusty_v8:
+        raise ReleaseError(
+            f"locked V8 {version} does not match manifest {manifest.toolchain.rusty_v8}"
+        )
+    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise ReleaseError("V8 Cargo lock record has no valid checksum")
+    if not isinstance(source, str) or not source:
+        raise ReleaseError("V8 Cargo lock record has no source")
+    return {"version": version, "source": source, "checksum": checksum}
+
+
+def v8_input_descriptor(manifest: Manifest, source_dir: Path) -> dict[str, Any]:
+    source_dir = source_dir.resolve()
+    if not source_dir.is_dir():
+        raise ReleaseError(f"V8 source directory does not exist: {source_dir}")
+    input_paths = [source_dir / name for name in V8_INPUT_FILES]
+    for directory_name in V8_INPUT_DIRECTORIES:
+        directory = source_dir / directory_name
+        if not directory.is_dir() or directory.is_symlink():
+            raise ReleaseError(f"V8 input directory is invalid: {directory_name}")
+        input_paths.extend(sorted(directory.rglob("*")))
+
+    files: dict[str, dict[str, Any]] = {}
+    for path in sorted(input_paths, key=lambda item: item.relative_to(source_dir).as_posix()):
+        relative = path.relative_to(source_dir).as_posix()
+        if path.is_dir() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseError(f"V8 input must be a regular file: {relative}")
+        files[relative] = asset_record(path)
+    missing = [name for name in V8_INPUT_FILES if name not in files]
+    if missing:
+        raise ReleaseError(f"required V8 inputs are missing: {missing}")
+
+    bazel_version = (source_dir / ".bazelversion").read_text(encoding="utf-8").strip()
+    if not bazel_version:
+        raise ReleaseError(".bazelversion is empty")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "builder_revision": V8_BUILDER_REVISION,
+        "target": manifest.distribution.target,
+        "platform": V8_PLATFORM,
+        "profile": manifest.policy.v8_profile,
+        "compilation_mode": V8_COMPILATION_MODE,
+        "bazel_configs": list(V8_BAZEL_CONFIGS),
+        "bazel": bazel_version,
+        "bazelisk": V8_BAZELISK_VERSION,
+        "runner_image": V8_RUNNER_IMAGE,
+        "v8_crate": _v8_lock_record(manifest, source_dir),
+        "files": files,
+    }
+
+
+def v8_input_digest(descriptor: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def v8_release_tag(manifest: Manifest, source_dir: Path) -> str:
+    digest = v8_input_digest(v8_input_descriptor(manifest, source_dir))
+    return f"rusty-v8-riscv64-v{manifest.toolchain.rusty_v8}-{digest[:12]}"
+
+
+def finalize_v8_artifact(
+    manifest: Manifest,
+    source_dir: Path,
+    v8_dir: Path,
+    *,
+    run_id: str,
+    head_sha: str,
+    source_kind: str,
+    bootstrap_candidate_run_id: str | None = None,
+    created_at: dt.datetime | None = None,
+) -> dict[str, Any]:
+    if not run_id.isdigit():
+        raise ReleaseError("V8 run ID must be numeric")
+    if SHA_RE.fullmatch(head_sha) is None:
+        raise ReleaseError("V8 head SHA is invalid")
+    if source_kind not in {"build", "bootstrap"}:
+        raise ReleaseError("V8 source kind must be build or bootstrap")
+    if source_kind == "bootstrap":
+        if bootstrap_candidate_run_id is None or not bootstrap_candidate_run_id.isdigit():
+            raise ReleaseError("bootstrap V8 source requires a candidate run ID")
+    elif bootstrap_candidate_run_id is not None:
+        raise ReleaseError("built V8 source cannot name a bootstrap candidate")
+
+    archive_name, binding_name, checksums_name, build_name = v8_artifact_names(
+        manifest
+    )
+    expected = {archive_name, binding_name, checksums_name}
+    actual = {path.name for path in v8_dir.iterdir()}
+    if actual != expected:
+        raise ReleaseError(
+            "unsealed V8 artifact set mismatch: "
+            f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
+        )
+    unsafe = [
+        path.name for path in v8_dir.iterdir() if path.is_symlink() or not path.is_file()
+    ]
+    if unsafe:
+        raise ReleaseError(f"V8 artifacts must be regular files: {unsafe}")
+
+    payload = {
+        archive_name: asset_record(v8_dir / archive_name),
+        binding_name: asset_record(v8_dir / binding_name),
+    }
+    expected_sums = "".join(
+        f"{payload[name]['sha256']}  {name}\n" for name in (archive_name, binding_name)
+    )
+    try:
+        actual_sums = (v8_dir / checksums_name).read_text(encoding="utf-8")
+    except OSError as error:
+        raise ReleaseError(f"cannot read V8 checksums: {error}") from error
+    if actual_sums != expected_sums:
+        raise ReleaseError("V8 checksum manifest does not match payloads")
+    assets = {**payload, checksums_name: asset_record(v8_dir / checksums_name)}
+    descriptor = v8_input_descriptor(manifest, source_dir)
+    digest = v8_input_digest(descriptor)
+    builder: dict[str, Any] = {
+        "repository": manifest.distribution.repository,
+        "workflow": V8_WORKFLOW_PATH,
+        "run_id": run_id,
+        "head_sha": head_sha,
+        "source_kind": source_kind,
+    }
+    if bootstrap_candidate_run_id is not None:
+        builder["bootstrap_candidate_run_id"] = bootstrap_candidate_run_id
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": (
+            created_at or dt.datetime.now(dt.timezone.utc)
+        ).astimezone(dt.timezone.utc).isoformat(),
+        "release_tag": f"rusty-v8-riscv64-v{manifest.toolchain.rusty_v8}-{digest[:12]}",
+        "input_sha256": digest,
+        "input": descriptor,
+        "builder": builder,
+        "assets": assets,
+    }
+    write_json(v8_dir / build_name, result)
+    return result
+
+
+def validate_v8_artifact(
+    manifest: Manifest, source_dir: Path, v8_dir: Path
+) -> dict[str, Any]:
+    archive_name, binding_name, checksums_name, build_name = v8_artifact_names(
+        manifest
+    )
+    expected_names = {archive_name, binding_name, checksums_name, build_name}
+    actual_names = {path.name for path in v8_dir.iterdir()}
+    if actual_names != expected_names:
+        raise ReleaseError(
+            "V8 artifact set mismatch: "
+            f"missing={sorted(expected_names - actual_names)}, "
+            f"unexpected={sorted(actual_names - expected_names)}"
+        )
+    unsafe = [
+        path.name for path in v8_dir.iterdir() if path.is_symlink() or not path.is_file()
+    ]
+    if unsafe:
+        raise ReleaseError(f"V8 artifact entries must be regular files: {unsafe}")
+
+    metadata = read_json_object(v8_dir / build_name)
+    descriptor = v8_input_descriptor(manifest, source_dir)
+    digest = v8_input_digest(descriptor)
+    expected_tag = f"rusty-v8-riscv64-v{manifest.toolchain.rusty_v8}-{digest[:12]}"
+    if metadata.get("schema_version") != SCHEMA_VERSION:
+        raise ReleaseError("V8 build schema is unsupported")
+    if metadata.get("release_tag") != expected_tag:
+        raise ReleaseError("V8 release tag does not match inputs")
+    if metadata.get("input_sha256") != digest or metadata.get("input") != descriptor:
+        raise ReleaseError("V8 build input fingerprint does not match source")
+    builder = metadata.get("builder")
+    if not isinstance(builder, dict):
+        raise ReleaseError("V8 build has no builder identity")
+    if builder.get("repository") != manifest.distribution.repository:
+        raise ReleaseError("V8 builder repository does not match manifest")
+    if builder.get("workflow") != V8_WORKFLOW_PATH:
+        raise ReleaseError("V8 builder workflow is unexpected")
+    if not str(builder.get("run_id", "")).isdigit():
+        raise ReleaseError("V8 builder run ID is invalid")
+    if SHA_RE.fullmatch(str(builder.get("head_sha", ""))) is None:
+        raise ReleaseError("V8 builder head SHA is invalid")
+    if builder.get("source_kind") not in {"build", "bootstrap"}:
+        raise ReleaseError("V8 build source kind is invalid")
+    if builder.get("source_kind") == "bootstrap" and not str(
+        builder.get("bootstrap_candidate_run_id", "")
+    ).isdigit():
+        raise ReleaseError("V8 bootstrap candidate run ID is invalid")
+
+    expected_assets = {
+        name: asset_record(v8_dir / name)
+        for name in (archive_name, binding_name, checksums_name)
+    }
+    if metadata.get("assets") != expected_assets:
+        raise ReleaseError("V8 asset digest or size mismatch")
+    expected_sums = "".join(
+        f"{expected_assets[name]['sha256']}  {name}\n"
+        for name in (archive_name, binding_name)
+    )
+    if (v8_dir / checksums_name).read_text(encoding="utf-8") != expected_sums:
+        raise ReleaseError("V8 checksum manifest does not match metadata")
+    return metadata
 
 
 def required_payload_names(manifest: Manifest) -> tuple[str, ...]:

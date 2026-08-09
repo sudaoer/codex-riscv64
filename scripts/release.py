@@ -14,6 +14,7 @@ from release_lib import (
     build_spdx_document,
     check_patch_scope,
     finalize_candidate,
+    finalize_v8_artifact,
     github_output,
     load_manifest,
     patch_series_digest,
@@ -23,6 +24,11 @@ from release_lib import (
     update_to_latest_stable,
     validate_candidate,
     validate_candidate_run,
+    validate_v8_artifact,
+    v8_artifact_names,
+    v8_input_descriptor,
+    v8_input_digest,
+    v8_release_tag,
     write_json,
 )
 
@@ -51,6 +57,30 @@ def parser() -> argparse.ArgumentParser:
     build_info.add_argument("--source-info", type=Path, required=True)
     build_info.add_argument("--output", type=Path, required=True)
     build_info.add_argument("--source-dir", type=Path, required=True)
+    build_info.add_argument("--v8-build", type=Path, required=True)
+
+    v8_key = commands.add_parser(
+        "v8-key", help="derive the immutable V8 release identity"
+    )
+    v8_key.add_argument("--source-dir", type=Path, required=True)
+
+    finalize_v8 = commands.add_parser(
+        "finalize-v8", help="seal an independently built V8 release pair"
+    )
+    finalize_v8.add_argument("--source-dir", type=Path, required=True)
+    finalize_v8.add_argument("--v8-dir", type=Path, required=True)
+    finalize_v8.add_argument("--run-id", required=True)
+    finalize_v8.add_argument("--head-sha", required=True)
+    finalize_v8.add_argument(
+        "--source-kind", choices=("build", "bootstrap"), required=True
+    )
+    finalize_v8.add_argument("--bootstrap-candidate-run-id")
+
+    validate_v8 = commands.add_parser(
+        "validate-v8", help="verify an independent V8 release pair"
+    )
+    validate_v8.add_argument("--source-dir", type=Path, required=True)
+    validate_v8.add_argument("--v8-dir", type=Path, required=True)
 
     sbom = commands.add_parser("sbom", help="convert Cargo metadata to SPDX 2.3")
     sbom.add_argument(
@@ -91,7 +121,11 @@ def command_version(command: list[str], cwd: Path | None = None) -> str:
 
 
 def write_build_info(
-    manifest_path: Path, source_info_path: Path, source_dir: Path, output: Path
+    manifest_path: Path,
+    source_info_path: Path,
+    source_dir: Path,
+    v8_build_path: Path,
+    output: Path,
 ) -> None:
     manifest = load_manifest(manifest_path)
     source_info = read_json_object(source_info_path)
@@ -110,6 +144,10 @@ def write_build_info(
             f"resolved V8 {resolved_v8} does not match manifest "
             f"{manifest.toolchain.rusty_v8}"
         )
+    v8_build = validate_v8_artifact(manifest, source_dir, v8_build_path.parent)
+    if v8_build_path.name != "v8-build.json":
+        raise ReleaseError("V8 build metadata must be named v8-build.json")
+    v8_input = v8_build["input"]
     build = {
         "schema_version": 1,
         "release_tag": manifest.release_tag,
@@ -122,8 +160,15 @@ def write_build_info(
             "rustc_verbose": command_version(["rustc", "-Vv"]),
             "cargo": command_version(["cargo", "-V"]),
             "zig_resolved": command_version(["zig", "version"]),
-            "bazel": command_version(["bazel", "--version"], cwd=source_dir),
+            "bazel": v8_input["bazel"],
+            "bazelisk": v8_input["bazelisk"],
             "rusty_v8_resolved": resolved_v8,
+        },
+        "v8": {
+            "release_tag": v8_build["release_tag"],
+            "input_sha256": v8_build["input_sha256"],
+            "builder": v8_build["builder"],
+            "assets": v8_build["assets"],
         },
         "patch_series_sha256": patch_series_digest(manifest.patches_dir),
         "source": source_info,
@@ -187,8 +232,42 @@ def main() -> int:
         print(json.dumps(values, indent=2, sort_keys=True))
     elif args.command == "build-info":
         write_build_info(
-            args.manifest, args.source_info, args.source_dir, args.output
+            args.manifest,
+            args.source_info,
+            args.source_dir,
+            args.v8_build,
+            args.output,
         )
+    elif args.command == "v8-key":
+        descriptor = v8_input_descriptor(manifest, args.source_dir)
+        digest = v8_input_digest(descriptor)
+        archive, binding, checksums, build = v8_artifact_names(manifest)
+        values = {
+            "v8_release_tag": v8_release_tag(manifest, args.source_dir),
+            "v8_input_sha256": digest,
+            "rusty_v8": manifest.toolchain.rusty_v8,
+            "v8_archive": archive,
+            "v8_binding": binding,
+            "v8_checksums": checksums,
+            "v8_build": build,
+            "bazelisk": descriptor["bazelisk"],
+        }
+        github_output(values)
+        print(json.dumps({**values, "input": descriptor}, indent=2, sort_keys=True))
+    elif args.command == "finalize-v8":
+        result = finalize_v8_artifact(
+            manifest,
+            args.source_dir,
+            args.v8_dir,
+            run_id=args.run_id,
+            head_sha=args.head_sha,
+            source_kind=args.source_kind,
+            bootstrap_candidate_run_id=args.bootstrap_candidate_run_id,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "validate-v8":
+        result = validate_v8_artifact(manifest, args.source_dir, args.v8_dir)
+        print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "sbom":
         cargo_metadata = [read_json_object(path) for path in args.cargo_metadata]
         document = build_spdx_document(

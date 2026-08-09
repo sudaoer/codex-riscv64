@@ -11,8 +11,9 @@ endorsed, signed, or supported by OpenAI.
 ## Release flow
 
 ```text
-stable upstream release -> update PR -> compatibility checks -> candidate build
-  -> local K3 validation -> protected environment approval -> GitHub Release
+stable upstream release -> update PR -> compatibility checks
+  -> immutable V8 resolve/build -> candidate build -> local K3 validation
+  -> protected environment approval -> GitHub Release
 ```
 
 The scheduled updater only follows stable `rust-vX.Y.Z` releases. Alpha builds
@@ -81,9 +82,22 @@ PR. Zig remains a downstream-controlled toolchain pin. A patch conflict or
 focused upstream test failure blocks that PR instead of silently dropping a
 patch.
 
-After `main` passes compatibility checks, Candidate build reconstructs the
-source and builds an immutable 14-day Actions artifact. On the maintainer
-workstation:
+After `main` passes compatibility checks, the V8 workflow derives a SHA-256
+identity from the actual Bazel/V8/LLVM/libc++ inputs. It reuses the matching
+attested prerelease when it exists, otherwise it builds and publishes that
+immutable V8 pair once. Candidate build independently derives the same key,
+downloads and verifies all four V8 release assets, then builds an immutable
+14-day Actions artifact without rebuilding V8. A Codex update that does not
+change those V8 inputs reuses the same release even if other Cargo lock entries
+changed.
+
+For the one-time migration from the old monolithic workflow, set the temporary
+Actions variable `V8_BOOTSTRAP_CANDIDATE_RUN_ID` to a successful Candidate run.
+The V8 workflow validates that candidate and its attestations before sealing
+and re-attesting the extracted V8 bytes. Delete the variable after the first V8
+release is created. It is ignored whenever the exact V8 release already exists.
+
+On the maintainer workstation:
 
 ```sh
 python3 scripts/k3_validate.py --run-id RUN_ID --ssh-host k3
@@ -108,7 +122,9 @@ tags or releases are never overwritten.
 Each release contains primary and app-server packages, the responses proxy,
 the exact `rusty_v8` archive and binding, checksums, build metadata, SPDX SBOM,
 K3 evidence, license notices, and the installer. GitHub artifact attestations
-bind build outputs to the candidate workflow and source revision.
+bind build outputs to the candidate workflow and source revision. Build
+metadata also records the immutable V8 input digest, release tag, asset map,
+and V8 builder identity.
 
 Version 1 intentionally does not publish npm packages. RVA23/RVV builds remain
 experimental and cannot pass the stable manifest policy.

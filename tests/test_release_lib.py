@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import sys
 import tempfile
@@ -12,6 +13,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from release import write_build_info  # noqa: E402
+
 from release_lib import (  # noqa: E402
     REQUIRED_K3_TESTS,
     ReleaseError,
@@ -19,6 +22,7 @@ from release_lib import (  # noqa: E402
     build_spdx_document,
     check_patch_scope,
     finalize_candidate,
+    finalize_v8_artifact,
     load_manifest,
     patch_series_digest,
     preflight_publish,
@@ -27,6 +31,11 @@ from release_lib import (  # noqa: E402
     resolve_upstream_toolchain,
     validate_candidate,
     validate_candidate_run,
+    validate_v8_artifact,
+    v8_artifact_names,
+    v8_input_descriptor,
+    v8_input_digest,
+    v8_release_tag,
     write_json,
 )
 
@@ -57,6 +66,28 @@ class ManifestTests(unittest.TestCase):
 
         candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
         self.assertNotIn("toolchain: ${{ steps.policy.outputs.rust }}", candidate)
+
+    def test_v8_and_candidate_workflows_are_separate(self) -> None:
+        candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
+        v8 = (ROOT / ".github/workflows/v8-build.yml").read_text()
+        self.assertIn('workflows: ["V8 build"]', candidate)
+        self.assertIn("gh release download", candidate)
+        self.assertIn("gh attestation verify", candidate)
+        self.assertIn("validate-v8", candidate)
+        self.assertIn("v8-handoff.json", candidate)
+        self.assertNotIn("WORKFLOW_RUN_SHA", candidate)
+        self.assertNotIn("setup-bazel@", candidate)
+        self.assertNotIn("run_bazel_with_buildbuddy.py", candidate)
+        self.assertIn('workflows: ["Compatibility check"]', v8)
+        self.assertIn("bash scripts/build_v8.sh", v8)
+        self.assertIn("gh release create", v8)
+        self.assertIn("actions/attest@", v8)
+        self.assertIn("v8-handoff.json", v8)
+        candidate_script = (ROOT / "scripts/build_candidate.sh").read_text()
+        v8_script = (ROOT / "scripts/build_v8.sh").read_text()
+        self.assertNotIn("run_bazel_with_buildbuddy.py", candidate_script)
+        self.assertIn("run_bazel_with_buildbuddy.py", v8_script)
+        self.assertIn("validate-v8", candidate_script)
 
     def test_manifest_update_replaces_only_named_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -216,6 +247,131 @@ class CandidateTests(unittest.TestCase):
                 now=self.now,
             )
 
+
+class V8ArtifactTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.manifest = load_manifest(ROOT / "release" / "upstream.toml")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        for name in (
+            ".bazelversion",
+            ".bazelrc",
+            "BUILD.bazel",
+            "MODULE.bazel",
+            "MODULE.bazel.lock",
+            ".github/scripts/run_bazel_with_buildbuddy.py",
+            ".github/scripts/rusty_v8_bazel.py",
+            ".github/scripts/rusty_v8_module_bazel.py",
+        ):
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("9.0.0\n" if name == ".bazelversion" else f"{name}\n")
+        for name in ("patches/v8.patch", "third_party/v8/BUILD.bazel"):
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{name}\n")
+        lock = self.source / "codex-rs" / "Cargo.lock"
+        lock.parent.mkdir()
+        lock.write_text(
+            "[[package]]\n"
+            'name = "v8"\n'
+            f'version = "{self.manifest.toolchain.rusty_v8}"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            f'checksum = "{"a" * 64}"\n'
+        )
+
+        self.v8_dir = self.root / "v8"
+        self.v8_dir.mkdir()
+        archive, binding, checksums, _build = v8_artifact_names(self.manifest)
+        (self.v8_dir / archive).write_bytes(b"archive")
+        (self.v8_dir / binding).write_bytes(b"binding")
+        sums = "".join(
+            f"{hashlib.sha256((self.v8_dir / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in (archive, binding)
+        )
+        (self.v8_dir / checksums).write_text(sums)
+        self.metadata = finalize_v8_artifact(
+            self.manifest,
+            self.source,
+            self.v8_dir,
+            run_id="45678",
+            head_sha="3" * 40,
+            source_kind="build",
+            created_at=dt.datetime(2026, 8, 10, tzinfo=dt.timezone.utc),
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_v8_identity_and_seal_are_deterministic(self) -> None:
+        descriptor = v8_input_descriptor(self.manifest, self.source)
+        digest = v8_input_digest(descriptor)
+        self.assertEqual(self.metadata["input_sha256"], digest)
+        self.assertEqual(
+            self.metadata["release_tag"], v8_release_tag(self.manifest, self.source)
+        )
+        self.assertEqual(
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir),
+            self.metadata,
+        )
+
+    def test_unrelated_cargo_lock_package_does_not_bust_v8_identity(self) -> None:
+        before = v8_release_tag(self.manifest, self.source)
+        lock = self.source / "codex-rs" / "Cargo.lock"
+        lock.write_text(
+            lock.read_text()
+            + "\n[[package]]\nname = \"unrelated\"\nversion = \"1.2.3\"\n"
+        )
+        self.assertEqual(v8_release_tag(self.manifest, self.source), before)
+
+    def test_v8_input_or_payload_tampering_fails(self) -> None:
+        archive = v8_artifact_names(self.manifest)[0]
+        (self.v8_dir / archive).write_bytes(b"tampered")
+        with self.assertRaisesRegex(ReleaseError, "digest or size mismatch"):
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir)
+
+        (self.source / "third_party/v8/BUILD.bazel").write_text("changed\n")
+        with self.assertRaisesRegex(ReleaseError, "release tag does not match inputs"):
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir)
+
+    def test_build_info_embeds_independent_v8_provenance(self) -> None:
+        source_info = self.root / "source-info.json"
+        write_json(
+            source_info,
+            {
+                "schema_version": 1,
+                "status": "ready",
+                "upstream_commit_sha": self.manifest.upstream.commit_sha,
+            },
+        )
+        output = self.root / "build-info.json"
+
+        def version(command: list[str], cwd: Path | None = None) -> str:
+            del cwd
+            if command[0] == "python3":
+                return self.manifest.toolchain.rusty_v8
+            if command[0] == "rustc":
+                return "rustc 1.95.0 test"
+            if command[0] == "cargo":
+                return "cargo 1.95.0 test"
+            if command[0] == "zig":
+                return "0.14.0"
+            raise AssertionError(f"unexpected version command: {command}")
+
+        with patch("release.command_version", side_effect=version):
+            write_build_info(
+                ROOT / "release" / "upstream.toml",
+                source_info,
+                self.source,
+                self.v8_dir / "v8-build.json",
+                output,
+            )
+        build = json.loads(output.read_text())
+        self.assertEqual(build["toolchain"]["bazel"], "9.0.0")
+        self.assertEqual(build["v8"]["input_sha256"], self.metadata["input_sha256"])
+        self.assertEqual(build["v8"]["builder"], self.metadata["builder"])
 
 class SbomTests(unittest.TestCase):
     def test_spdx_output_is_deterministic_for_fixed_time(self) -> None:

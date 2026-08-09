@@ -104,3 +104,37 @@ release path.
 - The pinned Rust action is version-specific and accepts only target/component
   inputs. Its invalid `toolchain` input was removed, eliminating the hosted
   runner warning while retaining Rust 1.95.0 from the pinned action revision.
+
+## Successful monolithic baseline and V8 split (2026-08-10)
+
+- Candidate run `31313918744` succeeded from downstream commit
+  `1e72a45e35962988d4c813f4398c05db5f963d8b`. The job completed in
+  3 hours 34 minutes 33 seconds; candidate sealing, 16-subject build-provenance
+  attestation, and artifact upload all passed.
+- V8 remained the dominant cost: Bazel completed 15,712 actions in
+  9,260.514 seconds (2 hours 34 minutes 20 seconds). The bwrap build took
+  29.55 seconds, the main Codex release build took 53 minutes 20 seconds,
+  ripgrep took 1 minute 21 seconds, and packaging/SBOM/upload consumed the
+  remaining few minutes.
+- The new `V8 build` workflow runs after Compatibility check and before
+  Candidate build. It publishes an immutable prerelease keyed by the V8 crate
+  version plus a content digest of the Bazel version/configuration, module
+  lock, V8 helper scripts, `third_party/v8`, and the V8/LLVM/libc++ patch set.
+  The key deliberately extracts only the V8 Cargo lock record, so unrelated
+  Codex dependency changes do not force a V8 rebuild.
+- Candidate build no longer sets up Bazel or invokes the V8 target. It derives
+  the same key, downloads the exact four-file V8 release, validates its sealed
+  input and asset maps, verifies the V8 workflow attestations, and passes the
+  archive and binding through the existing `RUSTY_V8_ARCHIVE` and
+  `RUSTY_V8_SRC_BINDING_PATH` interfaces.
+- The V8 workflow uploads a small, exact-run handoff containing the original
+  Compatibility source SHA, V8 tag, and full input digest. Candidate uses that
+  handoff instead of trusting the nested workflow run's default-branch SHA,
+  then recomputes and compares the identity after checking out the exact source.
+- A one-time bootstrap path can consume a named successful legacy Candidate.
+  It validates the complete candidate/run identity and verifies all three V8
+  asset attestations before generating `v8-build.json` and re-attesting the
+  four-file V8 release. A local rehearsal against run `31313918744` passed and
+  produced input SHA-256
+  `10f4df4a7b9da4e4e64160a0e013cac9a72f662dd65c74c643868d678ad6b4fe`
+  and tag `rusty-v8-riscv64-v150.4.0-10f4df4a7b9d`.
