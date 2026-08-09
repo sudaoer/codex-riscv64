@@ -44,44 +44,48 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
-          if [[ "$EVENT_NAME" == workflow_run ]]; then
-            python3 - <<'PY'
-            import json
-            import os
-            import re
-            from pathlib import Path
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
 
-            handoff = json.loads(
-                Path(os.environ["RUNNER_TEMP"], "handoff", "v8-handoff.json").read_text()
-            )
-            expected_keys = {
-                "schema_version",
-                "v8_run_id",
-                "source_sha",
-                "v8_release_tag",
-                "v8_input_sha256",
-            }
-            if set(handoff) != expected_keys or handoff["schema_version"] != 1:
-                raise SystemExit("invalid V8 handoff schema")
-            if str(handoff["v8_run_id"]) != os.environ["WORKFLOW_RUN_ID"]:
-                raise SystemExit("V8 handoff run ID mismatch")
-            if re.fullmatch(r"[0-9a-f]{40}", str(handoff["source_sha"])) is None:
-                raise SystemExit("invalid V8 handoff source SHA")
-            if re.fullmatch(r"[0-9a-f]{64}", str(handoff["v8_input_sha256"])) is None:
-                raise SystemExit("invalid V8 handoff input SHA")
-            if re.fullmatch(
-                r"rusty-v8-riscv64-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}",
-                str(handoff["v8_release_tag"]),
-            ) is None:
-                raise SystemExit("invalid V8 handoff release tag")
-            with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-                output.write(f"sha={handoff['source_sha']}\n")
-                output.write(f"v8_release_tag={handoff['v8_release_tag']}\n")
-                output.write(f"v8_input_sha256={handoff['v8_input_sha256']}\n")
-            PY
-          else
-            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
-          fi
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              if os.environ["EVENT_NAME"] != "workflow_run":
+                  output.write(f"sha={os.environ['DISPATCH_SHA']}\n")
+                  raise SystemExit(0)
+
+              handoff = json.loads(
+                  Path(
+                      os.environ["RUNNER_TEMP"], "handoff", "v8-handoff.json"
+                  ).read_text()
+              )
+              expected_keys = {
+                  "schema_version",
+                  "v8_run_id",
+                  "source_sha",
+                  "v8_release_tag",
+                  "v8_input_sha256",
+              }
+              if set(handoff) != expected_keys or handoff["schema_version"] != 1:
+                  raise SystemExit("invalid V8 handoff schema")
+              if str(handoff["v8_run_id"]) != os.environ["WORKFLOW_RUN_ID"]:
+                  raise SystemExit("V8 handoff run ID mismatch")
+              if re.fullmatch(r"[0-9a-f]{40}", str(handoff["source_sha"])) is None:
+                  raise SystemExit("invalid V8 handoff source SHA")
+              if re.fullmatch(
+                  r"[0-9a-f]{64}", str(handoff["v8_input_sha256"])
+              ) is None:
+                  raise SystemExit("invalid V8 handoff input SHA")
+              if re.fullmatch(
+                  r"rusty-v8-riscv64-v[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{12}",
+                  str(handoff["v8_release_tag"]),
+              ) is None:
+                  raise SystemExit("invalid V8 handoff release tag")
+              output.write(f"sha={handoff['source_sha']}\n")
+              output.write(f"v8_release_tag={handoff['v8_release_tag']}\n")
+              output.write(f"v8_input_sha256={handoff['v8_input_sha256']}\n")
+          PY
 
       - name: Check out exact downstream inputs
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

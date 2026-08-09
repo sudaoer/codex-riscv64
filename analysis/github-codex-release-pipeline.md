@@ -138,3 +138,13 @@ release path.
   produced input SHA-256
   `10f4df4a7b9da4e4e64160a0e013cac9a72f662dd65c74c643868d678ad6b4fe`
   and tag `rusty-v8-riscv64-v150.4.0-10f4df4a7b9d`.
+- On GitHub, Compatibility run `31324296843` passed in 1 minute 7 seconds and
+  V8 run `31324346914` bootstrapped, attested, published, reverified, and
+  uploaded its handoff in 1 minute 15 seconds. Bazel setup, prerequisite
+  installation, and V8 compilation were all explicitly skipped.
+- The first split Candidate run `31324404164` exposed a shell-only defect in
+  the handoff parser: a Python heredoc terminator was indented inside a shell
+  `if`, so bash rejected the step before Python ran. The parser now uses one
+  top-level Python heredoc for both event branches. Replaying that exact YAML
+  step against run `31324346914`'s downloaded handoff produced the expected
+  source SHA, V8 release tag, and full input digest.
