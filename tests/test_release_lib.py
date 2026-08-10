@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +23,12 @@ from release_lib import (  # noqa: E402
     Toolchain,
     Upstream,
     build_spdx_document,
+    check_release_state,
     check_patch_scope,
+    decide_build_required,
     finalize_candidate,
     finalize_v8_artifact,
+    github_release_by_tag,
     load_manifest,
     load_policy,
     normalize_release_cargo_lock,
@@ -121,6 +125,71 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("run_bazel_with_buildbuddy.py", candidate_script)
         self.assertIn("run_bazel_with_buildbuddy.py", v8_script)
         self.assertIn("validate-v8", candidate_script)
+
+    def test_documentation_push_is_filtered_but_pull_requests_are_not(self) -> None:
+        compat = (ROOT / ".github/workflows/compat-check.yml").read_text()
+        self.assertIn("pull_request:\n", compat)
+        self.assertRegex(
+            compat,
+            r"push:\n    branches: \[main\]\n    paths-ignore:\n"
+            r"      - '\*\*/\*\.md'\n      - 'analysis/\*\*'",
+        )
+
+    def test_candidate_fast_path_precedes_expensive_steps(self) -> None:
+        candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
+        release_state = candidate.index("release-state")
+        for step_name in (
+            "Reconstruct exact patched source",
+            "Download and verify immutable V8 release",
+            "Set up exact upstream Rust",
+            "Set up Zig",
+        ):
+            self.assertLess(release_state, candidate.index(step_name))
+
+        expensive_steps = (
+            "Reconstruct exact patched source",
+            "Resolve immutable V8 identity",
+            "Download and verify immutable V8 release",
+            "Set up exact upstream Rust",
+            "Use a hermetic Cargo home",
+            "Check target Cargo lockfile",
+            "Set up Zig",
+            "Install packaging prerequisites",
+            "Install upstream musl build tools",
+            "Build and seal candidate",
+            "Generate build provenance attestation",
+            "Upload immutable candidate",
+        )
+        for step_name in expensive_steps:
+            start = candidate.index(f"- name: {step_name}\n")
+            end = candidate.find("\n      - name:", start)
+            if end == -1:
+                end = len(candidate)
+            block = candidate[start:end]
+            self.assertIn(
+                "if: steps.decide.outputs.build_required == 'true'", block
+            )
+
+        self.assertIn("force_rebuild:\n", candidate)
+        self.assertIn("type: boolean", candidate)
+        self.assertIn("default: false", candidate)
+        self.assertIn("No new Candidate was generated", candidate)
+        self.assertIn("steps.decide.outputs.build_required == 'false'", candidate)
+        self.assertIn(
+            "if: ${{ !(github.event_name == 'workflow_dispatch' "
+            "&& inputs.force_rebuild == true) }}",
+            candidate,
+        )
+        self.assertIn(
+            "RELEASE_HIT: ${{ steps.release.outputs.hit || 'false' }}",
+            candidate,
+        )
+
+    def test_upstream_watcher_reuses_the_formal_release_check(self) -> None:
+        watcher = (ROOT / ".github/workflows/upstream-watch.yml").read_text()
+        self.assertIn("release-state", watcher)
+        self.assertIn("steps.state.outputs.hit == 'false'", watcher)
+        self.assertNotIn("gh release view", watcher)
 
     def test_release_lock_round_trip_is_canonical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -348,6 +417,231 @@ class CandidateTests(unittest.TestCase):
                 expected_run_id="12345",
                 now=self.now,
             )
+
+
+class ReleaseStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.manifest = test_manifest()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.candidate_dir = self.root / "candidate"
+        self.candidate_dir.mkdir()
+        for name in required_payload_names(self.manifest):
+            (self.candidate_dir / name).write_bytes(f"asset:{name}\n".encode())
+        write_json(
+            self.candidate_dir / "release-lock.json", self.manifest.release_lock()
+        )
+        source_info = self.root / "source-info.json"
+        write_json(
+            source_info,
+            {
+                "schema_version": 1,
+                "status": "ready",
+                "upstream_commit_sha": self.manifest.upstream.commit_sha,
+                "downstream_commit_sha": "1" * 40,
+                "policy_sha256": self.manifest.policy_sha256,
+                "release_lock_sha256": self.manifest.release_lock_sha256,
+                "patch_series_sha256": patch_series_digest(self.manifest.patches_dir),
+            },
+        )
+        finalize_candidate(
+            self.manifest,
+            self.candidate_dir,
+            run_id="12345",
+            head_sha="2" * 40,
+            source_info_path=source_info,
+            created_at=dt.datetime(2026, 8, 9, 8, 0, tzinfo=dt.timezone.utc),
+        )
+        self.asset_bytes = {
+            path.name: path.read_bytes()
+            for path in self.candidate_dir.iterdir()
+            if path.is_file()
+        }
+        self.asset_bytes["k3-report.json"] = (
+            b'{"schema_version": 1, "overall": "pass"}\n'
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def fake_release(
+        self,
+        *,
+        assets: dict[str, bytes] | None = None,
+        draft: bool = False,
+        prerelease: bool = False,
+    ) -> dict[str, object]:
+        selected = assets if assets is not None else self.asset_bytes
+        return {
+            "draft": draft,
+            "prerelease": prerelease,
+            "assets": [
+                {
+                    "name": name,
+                    "size": len(data),
+                    "state": "uploaded",
+                    "url": f"https://api.example.test/assets/{name}",
+                    "browser_download_url": f"https://example.test/{name}",
+                }
+                for name, data in selected.items()
+            ],
+        }
+
+    def run_check(
+        self,
+        release: dict[str, object] | None = None,
+        *,
+        asset_bytes: dict[str, bytes] | None = None,
+    ) -> dict[str, object]:
+        selected = asset_bytes if asset_bytes is not None else self.asset_bytes
+        if release is None:
+            release = self.fake_release(assets=selected)
+
+        def fake_download(
+            url: str, destination: Path, *, token: str | None = None
+        ) -> dict[str, object]:
+            del token
+            data = selected[Path(url).name]
+            destination.write_bytes(data)
+            return {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+
+        with (
+            patch("release_lib.github_release_by_tag", return_value=release),
+            patch(
+                "release_lib.download_release_asset", side_effect=fake_download
+            ),
+        ):
+            return check_release_state(self.manifest)
+
+    def test_missing_release_is_not_a_hit(self) -> None:
+        with patch("release_lib.github_release_by_tag", return_value=None):
+            state = check_release_state(self.manifest)
+        self.assertFalse(state["exists"])
+        self.assertEqual(state["release_tag"], self.manifest.release_tag)
+
+    def test_complete_formal_release_is_a_hit(self) -> None:
+        state = self.run_check()
+        self.assertTrue(state["exists"])
+        self.assertFalse(state["draft"])
+        self.assertFalse(state["prerelease"])
+        self.assertEqual(state["asset_count"], len(self.asset_bytes))
+        self.assertEqual(
+            state["assets"]["NOTICE"],
+            {
+                "sha256": hashlib.sha256(
+                    self.asset_bytes["NOTICE"]
+                ).hexdigest(),
+                "size": len(self.asset_bytes["NOTICE"]),
+            },
+        )
+
+    def test_draft_or_prerelease_is_not_a_hit(self) -> None:
+        with self.assertRaisesRegex(ReleaseError, "draft or prerelease"):
+            self.run_check(self.fake_release(draft=True))
+        with self.assertRaisesRegex(ReleaseError, "draft or prerelease"):
+            self.run_check(self.fake_release(prerelease=True))
+
+    def test_missing_release_asset_fails(self) -> None:
+        missing = dict(self.asset_bytes)
+        missing.pop("NOTICE")
+        with self.assertRaisesRegex(ReleaseError, "asset set mismatch"):
+            self.run_check(asset_bytes=missing)
+
+    def test_duplicate_release_asset_fails(self) -> None:
+        release = self.fake_release()
+        assets = release["assets"]
+        if not isinstance(assets, list):
+            raise AssertionError("fake release assets must be a list")
+        release["assets"] = [*assets, assets[0]]
+        with self.assertRaisesRegex(ReleaseError, "duplicate GitHub release asset"):
+            self.run_check(release)
+
+    def test_release_asset_digest_tampering_fails(self) -> None:
+        tampered = dict(self.asset_bytes)
+        tampered["SHA256SUMS"] = b"tampered"
+
+        def fake_download(
+            url: str, destination: Path, *, token: str | None = None
+        ) -> dict[str, object]:
+            del token
+            data = tampered[Path(url).name]
+            destination.write_bytes(data)
+            return {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            }
+
+        release = self.fake_release(assets=tampered)
+        with (
+            patch("release_lib.github_release_by_tag", return_value=release),
+            patch(
+                "release_lib.download_release_asset", side_effect=fake_download
+            ),
+            self.assertRaisesRegex(ReleaseError, "candidate.json.*assets"),
+        ):
+            check_release_state(self.manifest)
+
+    def test_release_metadata_mismatch_fails(self) -> None:
+        mismatched = dict(self.asset_bytes)
+        lock = json.loads(mismatched["release-lock.json"])
+        lock["upstream"]["version"] = "9.9.9"
+        mismatched["release-lock.json"] = json.dumps(
+            lock, indent=2, sort_keys=True
+        ).encode()
+        with self.assertRaisesRegex(ReleaseError, "release-lock.json"):
+            self.run_check(asset_bytes=mismatched)
+
+    def test_api_failure_fails_the_check(self) -> None:
+        with (
+            patch(
+                "release_lib.github_release_by_tag",
+                side_effect=ReleaseError("GitHub request failed temporarily"),
+            ),
+            self.assertRaisesRegex(ReleaseError, "GitHub request failed"),
+        ):
+            check_release_state(self.manifest)
+
+    def test_tag_lookup_distinguishes_404_and_network_failure(self) -> None:
+        with patch(
+            "release_lib.urllib.request.urlopen",
+            side_effect=HTTPError(
+                "https://api.github.test", 404, "Not Found", {}, None
+            ),
+        ):
+            self.assertIsNone(github_release_by_tag(self.manifest))
+        with (
+            patch(
+                "release_lib.urllib.request.urlopen",
+                side_effect=URLError("temporary outage"),
+            ),
+            self.assertRaisesRegex(ReleaseError, "GitHub request failed"),
+        ):
+            github_release_by_tag(self.manifest)
+
+    def test_force_rebuild_decision(self) -> None:
+        self.assertEqual(
+            decide_build_required("workflow_dispatch", True, True),
+            (True, "manual-force"),
+        )
+        self.assertEqual(
+            decide_build_required("workflow_dispatch", True, False),
+            (True, "manual-force"),
+        )
+        self.assertEqual(
+            decide_build_required("workflow_dispatch", False, True),
+            (False, "formal-release-exists"),
+        )
+        self.assertEqual(
+            decide_build_required("workflow_dispatch", False, False),
+            (True, "no-formal-release"),
+        )
+        self.assertEqual(
+            decide_build_required("workflow_run", True, False),
+            (True, "no-formal-release"),
+        )
 
 
 class V8ArtifactTests(unittest.TestCase):

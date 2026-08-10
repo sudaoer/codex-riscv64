@@ -9,7 +9,9 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import tomllib
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -1095,6 +1097,290 @@ def required_payload_names(manifest: Manifest) -> tuple[str, ...]:
         "LICENSE",
         "NOTICE",
     )
+
+
+def formal_release_asset_names(manifest: Manifest) -> tuple[str, ...]:
+    return (
+        *required_payload_names(manifest),
+        "release.json",
+        "SHA256SUMS",
+        "candidate.json",
+        "k3-report.json",
+    )
+
+
+def github_release_by_tag(
+    manifest: Manifest, *, token: str | None = None
+) -> dict[str, Any] | None:
+    encoded_tag = urllib.parse.quote(manifest.release_tag, safe="")
+    url = (
+        f"https://api.github.com/repos/{manifest.distribution.repository}"
+        f"/releases/tags/{encoded_tag}"
+    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "codex-riscv64-release-tools",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            value = json.load(response)
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code == 404:
+            return None
+        raise ReleaseError(f"GitHub request failed for {url}: {error}") from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReleaseError(f"GitHub request failed for {url}: {error}") from error
+    if not isinstance(value, dict):
+        raise ReleaseError(f"GitHub response is not an object: {url}")
+    return value
+
+
+class _ReleaseDownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(
+            req.full_url
+        ).netloc:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+_RELEASE_DOWNLOAD_OPENER = urllib.request.build_opener(
+    _ReleaseDownloadRedirectHandler()
+)
+
+
+def download_release_asset(
+    url: str, destination: Path, *, token: str | None = None
+) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": "codex-riscv64-release-tools",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with (
+            _RELEASE_DOWNLOAD_OPENER.open(request, timeout=60) as response,
+            destination.open("wb") as output,
+        ):
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+                output.write(chunk)
+    except OSError as error:
+        raise ReleaseError(
+            f"cannot download release asset {destination.name}: {error}"
+        ) from error
+    return {"sha256": digest.hexdigest(), "size": size}
+
+
+def release_asset_map(release: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    raw_assets = release.get("assets")
+    if not isinstance(raw_assets, list):
+        raise ReleaseError("GitHub release has no asset list")
+    assets: dict[str, Mapping[str, Any]] = {}
+    for asset in raw_assets:
+        if not isinstance(asset, Mapping):
+            raise ReleaseError("GitHub release asset is not an object")
+        name = asset.get("name")
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ReleaseError(f"invalid GitHub release asset name: {name!r}")
+        if name in assets:
+            raise ReleaseError(f"duplicate GitHub release asset: {name}")
+        assets[name] = asset
+    return assets
+
+
+def _revision_hint() -> str:
+    return "increment distribution.revision in release/policy.toml to publish new bytes"
+
+
+def check_release_state(
+    manifest: Manifest,
+    *,
+    token: str | None = None,
+    download_dir: Path | None = None,
+) -> dict[str, Any]:
+    release = github_release_by_tag(manifest, token=token)
+    if release is None:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "release_tag": manifest.release_tag,
+            "exists": False,
+        }
+    if release.get("draft") or release.get("prerelease"):
+        raise ReleaseError(
+            f"existing release {manifest.release_tag} is a draft or prerelease; "
+            f"{_revision_hint()}"
+        )
+
+    assets = release_asset_map(release)
+    expected_names = set(formal_release_asset_names(manifest))
+    if set(assets) != expected_names:
+        raise ReleaseError(
+            "existing release asset set mismatch: "
+            f"missing={sorted(expected_names - set(assets))}, "
+            f"unexpected={sorted(set(assets) - expected_names)}; "
+            f"{_revision_hint()}"
+        )
+
+    temporary = None
+    if download_dir is None:
+        temporary = tempfile.TemporaryDirectory()
+        asset_dir = Path(temporary.name)
+    else:
+        asset_dir = download_dir
+    try:
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        records: dict[str, dict[str, Any]] = {}
+        for name in sorted(expected_names):
+            asset = assets[name]
+            state = asset.get("state")
+            if state not in (None, "uploaded"):
+                raise ReleaseError(f"release asset {name} is not uploaded")
+            size = asset.get("size")
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                raise ReleaseError(f"release asset {name} has invalid size")
+            url = asset.get("url") or asset.get("browser_download_url")
+            if not isinstance(url, str) or not url:
+                raise ReleaseError(f"release asset {name} has no download URL")
+            actual = download_release_asset(url, asset_dir / name, token=token)
+            if actual["size"] != size:
+                raise ReleaseError(
+                    f"release asset size mismatch: {name}; {_revision_hint()}"
+                )
+            records[name] = actual
+
+        release_lock = read_json_object(asset_dir / "release-lock.json")
+        if release_lock != manifest.release_lock():
+            raise ReleaseError(
+                "existing release-lock.json does not match the current release lock; "
+                f"{_revision_hint()}"
+            )
+
+        expected_release = {
+            "schema_version": SCHEMA_VERSION,
+            "release_tag": manifest.release_tag,
+            "package_version": manifest.package_version,
+            "upstream": dataclasses.asdict(manifest.upstream),
+            "distribution": dataclasses.asdict(manifest.distribution),
+            "policy_sha256": manifest.policy_sha256,
+            "release_lock_sha256": manifest.release_lock_sha256,
+            "assets": {
+                name: records[name] for name in required_payload_names(manifest)
+            },
+        }
+        release_metadata = read_json_object(asset_dir / "release.json")
+        if release_metadata != expected_release:
+            raise ReleaseError(
+                "existing release.json does not match the current manifest; "
+                f"{_revision_hint()}"
+            )
+
+        expected_candidate_asset_names = (
+            *required_payload_names(manifest),
+            "release.json",
+            "SHA256SUMS",
+        )
+        expected_candidate_assets = {
+            name: records[name] for name in expected_candidate_asset_names
+        }
+        candidate = read_json_object(asset_dir / "candidate.json")
+        identity_errors: list[str] = []
+        if candidate.get("schema_version") != SCHEMA_VERSION:
+            identity_errors.append("schema_version")
+        if candidate.get("release_tag") != manifest.release_tag:
+            identity_errors.append("release_tag")
+        if candidate.get("package_version") != manifest.package_version:
+            identity_errors.append("package_version")
+        if candidate.get("upstream") != dataclasses.asdict(manifest.upstream):
+            identity_errors.append("upstream")
+        if candidate.get("distribution") != dataclasses.asdict(manifest.distribution):
+            identity_errors.append("distribution")
+        if candidate.get("policy_sha256") != manifest.policy_sha256:
+            identity_errors.append("policy_sha256")
+        if candidate.get("release_lock_sha256") != manifest.release_lock_sha256:
+            identity_errors.append("release_lock_sha256")
+        if candidate.get("patch_series_sha256") != patch_series_digest(
+            manifest.patches_dir
+        ):
+            identity_errors.append("patch_series_sha256")
+        if not str(candidate.get("candidate_run_id", "")).isdigit():
+            identity_errors.append("candidate_run_id")
+        if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
+            identity_errors.append("candidate_head_sha")
+        source = candidate.get("source")
+        if not isinstance(source, dict) or source.get("status") != "ready":
+            identity_errors.append("source.status")
+        elif (
+            source.get("upstream_commit_sha") != manifest.upstream.commit_sha
+            or source.get("policy_sha256") != manifest.policy_sha256
+            or source.get("release_lock_sha256") != manifest.release_lock_sha256
+            or source.get("patch_series_sha256")
+            != patch_series_digest(manifest.patches_dir)
+        ):
+            identity_errors.append("source identity")
+        if candidate.get("assets") != expected_candidate_assets:
+            identity_errors.append("assets")
+        if identity_errors:
+            raise ReleaseError(
+                "existing candidate.json does not match the current manifest "
+                f"({', '.join(identity_errors)}); {_revision_hint()}"
+            )
+
+        expected_sums = "".join(
+            f"{records[name]['sha256']}  {name}\n"
+            for name in sorted((*required_payload_names(manifest), "release.json"))
+        )
+        try:
+            actual_sums = (asset_dir / "SHA256SUMS").read_text(encoding="utf-8")
+        except OSError as error:
+            raise ReleaseError(f"cannot read SHA256SUMS: {error}") from error
+        if actual_sums != expected_sums:
+            raise ReleaseError(
+                "existing SHA256SUMS does not match the release assets; "
+                f"{_revision_hint()}"
+            )
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "release_tag": manifest.release_tag,
+        "exists": True,
+        "draft": bool(release.get("draft")),
+        "prerelease": bool(release.get("prerelease")),
+        "asset_count": len(records),
+        "assets": records,
+        "release_lock_sha256": manifest.release_lock_sha256,
+        "patch_series_sha256": patch_series_digest(manifest.patches_dir),
+    }
+
+
+def decide_build_required(
+    event_name: str, force_rebuild: bool, release_hit: bool
+) -> tuple[bool, str]:
+    if event_name == "workflow_dispatch" and force_rebuild:
+        return True, "manual-force"
+    if release_hit:
+        return False, "formal-release-exists"
+    return True, "no-formal-release"
 
 
 def finalize_candidate(

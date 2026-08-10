@@ -5,6 +5,12 @@ on:
     workflows: ["V8 build"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild and upload a diagnostic candidate even when a formal release exists
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -134,7 +140,44 @@ jobs:
             exit 1
           fi
 
+      - name: Check for an existing formal release
+        id: release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.force_rebuild == true) }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
+            release-state
+
+      - name: Decide whether a new build is required
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild == true }}
+          RELEASE_HIT: ${{ steps.release.outputs.hit || 'false' }}
+        run: |
+          python3 scripts/release.py decide-build \
+            --event-name "$EVENT_NAME" \
+            --force-rebuild "${FORCE_REBUILD,,}" \
+            --release-hit "$RELEASE_HIT"
+
+      - name: Record reused formal release
+        if: steps.decide.outputs.build_required == 'false'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+        run: |
+          {
+            echo "## Reused formal release"
+            echo
+            echo "Release \`${RELEASE_TAG}\` is already a complete formal release: ${RELEASE_URL}"
+            echo
+            echo "No new Candidate was generated. Build, attestation, and artifact upload steps were skipped."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Reconstruct exact patched source
+        if: steps.decide.outputs.build_required == 'true'
         run: |
           python3 scripts/release.py \
             --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
@@ -144,12 +187,14 @@ jobs:
 
       - name: Resolve immutable V8 identity
         id: v8
+        if: steps.decide.outputs.build_required == 'true'
         run: |
           python3 scripts/release.py \
             --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
             v8-key --source-dir "${RUNNER_TEMP}/source"
 
       - name: Download and verify immutable V8 release
+        if: steps.decide.outputs.build_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           V8_TAG: ${{ steps.v8.outputs.v8_release_tag }}
@@ -186,6 +231,7 @@ jobs:
           done
 
       - name: Set up exact upstream Rust
+        if: steps.decide.outputs.build_required == 'true'
         env:
           RUST_VERSION: ${{ steps.policy.outputs.rust }}
           TARGET: ${{ steps.policy.outputs.target }}
@@ -194,6 +240,7 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Use a hermetic Cargo home
+        if: steps.decide.outputs.build_required == 'true'
         run: |
           cargo_home="${RUNNER_TEMP}/cargo-home"
           mkdir -p "$cargo_home/bin"
@@ -202,6 +249,7 @@ jobs:
           echo "$cargo_home/bin" >> "$GITHUB_PATH"
 
       - name: Check target Cargo lockfile
+        if: steps.decide.outputs.build_required == 'true'
         working-directory: ${{ runner.temp }}/source/codex-rs
         run: |
           cargo metadata \
@@ -211,22 +259,26 @@ jobs:
             >/dev/null
 
       - name: Set up Zig
+        if: steps.decide.outputs.build_required == 'true'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ steps.policy.outputs.zig }}
           use-cache: false
 
       - name: Install packaging prerequisites
+        if: steps.decide.outputs.build_required == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils llvm pkg-config libcap-dev zstd
 
       - name: Install upstream musl build tools
+        if: steps.decide.outputs.build_required == 'true'
         env:
           TARGET: riscv64gc-unknown-linux-musl
         run: bash "${RUNNER_TEMP}/source/.github/scripts/install-musl-build-tools.sh"
 
       - name: Build and seal candidate
+        if: steps.decide.outputs.build_required == 'true'
         env:
           GITHUB_SHA: ${{ steps.source.outputs.sha }}
         run: |
@@ -238,11 +290,13 @@ jobs:
             --candidate-dir "${GITHUB_WORKSPACE}/candidate"
 
       - name: Generate build provenance attestation
+        if: steps.decide.outputs.build_required == 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: candidate/*
 
       - name: Upload immutable candidate
+        if: steps.decide.outputs.build_required == 'true'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: codex-riscv64-candidate

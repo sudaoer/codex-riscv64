@@ -16,7 +16,7 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - name: Check out downstream inputs
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -39,17 +39,14 @@ jobs:
       - name: Check downstream release state
         id: state
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release-lock.json" \
+            release-state
 
       - name: Trigger compatibility and build chain
-        if: steps.state.outputs.needed == 'true'
+        if: steps.state.outputs.hit == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
