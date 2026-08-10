@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: build_v8.sh --source-dir DIR --v8-dir DIR
+Usage: build_v8.sh --source-dir DIR --v8-dir DIR --release-lock FILE
 
 Builds and seals the reusable rusty_v8 release pair for Linux/riscv64 musl.
 EOF
@@ -11,6 +11,7 @@ EOF
 
 source_dir=""
 v8_dir=""
+release_lock=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-dir)
@@ -19,6 +20,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --v8-dir)
       v8_dir="${2:?--v8-dir requires a value}"
+      shift 2
+      ;;
+    --release-lock)
+      release_lock="${2:?--release-lock requires a value}"
       shift 2
       ;;
     -h|--help)
@@ -33,7 +38,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$source_dir" || -z "$v8_dir" ]]; then
+if [[ -z "$source_dir" || -z "$v8_dir" || -z "$release_lock" ]]; then
   usage >&2
   exit 2
 fi
@@ -42,6 +47,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$(cd "$source_dir" && pwd)"
+release_lock="$(cd "$(dirname "$release_lock")" && pwd)/$(basename "$release_lock")"
 mkdir -p "$v8_dir"
 v8_dir="$(cd "$v8_dir" && pwd)"
 if [[ -n "$(find "$v8_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
@@ -68,12 +74,12 @@ python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
   --bazel-config v8-target-riscv64 \
   --sandbox
 
-python3 "$repo_root/scripts/release.py" finalize-v8 \
+python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" finalize-v8 \
   --source-dir "$source_dir" \
   --v8-dir "$v8_dir" \
   --run-id "$GITHUB_RUN_ID" \
   --head-sha "$GITHUB_SHA" \
   --source-kind build
-python3 "$repo_root/scripts/release.py" validate-v8 \
+python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" validate-v8 \
   --source-dir "$source_dir" \
   --v8-dir "$v8_dir" >/dev/null

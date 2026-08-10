@@ -31,12 +31,25 @@ jobs:
       - name: Validate downstream release tooling
         id: policy
         run: |
-          python3 scripts/release.py validate
+          python3 scripts/release.py validate-policy
           python3 -m unittest discover -s tests -v
+
+      - name: Resolve latest stable release lock
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py resolve-latest \
+            --output "${RUNNER_TEMP}/release-lock.json"
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release-lock.json" \
+            validate
 
       - name: Reconstruct exact patched source
         run: |
-          python3 scripts/release.py prepare \
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release-lock.json" \
+            prepare \
             --source-dir "${RUNNER_TEMP}/source" \
             --report "${RUNNER_TEMP}/source-info.json"
 
@@ -52,10 +65,13 @@ jobs:
             scripts.codex_package.test_zsh \
             -v
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: ${{ steps.policy.outputs.target }}
+      - name: Set up exact upstream Rust
+        env:
+          RUST_VERSION: ${{ steps.release.outputs.rust }}
+          TARGET: ${{ steps.policy.outputs.target }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
+          rustup default "$RUST_VERSION"
 
       - name: Check Cargo workspace metadata
         working-directory: ${{ runner.temp }}/source/codex-rs
@@ -79,3 +95,12 @@ jobs:
         run: |
           bazel query \
             //third_party/v8:rusty_v8_sandbox_release_pair_riscv64gc_unknown_linux_musl
+
+      - name: Upload immutable release lock
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-riscv64-release-lock
+          path: ${{ runner.temp }}/release-lock.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

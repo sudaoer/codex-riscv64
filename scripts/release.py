@@ -17,14 +17,16 @@ from release_lib import (
     finalize_v8_artifact,
     github_output,
     load_manifest,
+    load_policy,
     patch_series_digest,
     preflight_publish,
     prepare_source,
     read_json_object,
-    update_to_latest_stable,
+    resolve_latest_manifest,
     validate_candidate,
     validate_candidate_run,
     validate_v8_artifact,
+    verify_latest_manifest,
     v8_artifact_names,
     v8_input_descriptor,
     v8_input_digest,
@@ -34,24 +36,32 @@ from release_lib import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "release" / "upstream.toml"
+DEFAULT_POLICY = ROOT / "release" / "policy.toml"
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
-        "--manifest", type=Path, default=DEFAULT_MANIFEST, help="release manifest"
+        "--policy", type=Path, default=DEFAULT_POLICY, help="release policy"
     )
+    result.add_argument("--release-lock", type=Path, help="resolved release lock")
     commands = result.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("validate", help="validate the manifest and patch policy")
+    commands.add_parser("validate-policy", help="validate the version-free policy")
+    commands.add_parser("validate", help="validate the policy and release lock")
 
     prepare = commands.add_parser("prepare", help="reconstruct patched upstream source")
     prepare.add_argument("--source-dir", type=Path, required=True)
     prepare.add_argument("--upstream-url")
     prepare.add_argument("--report", type=Path)
 
-    commands.add_parser("update-upstream", help="update the manifest to GitHub latest")
+    resolve = commands.add_parser(
+        "resolve-latest", help="resolve latest stable Codex to an immutable lock"
+    )
+    resolve.add_argument("--output", type=Path, required=True)
+    commands.add_parser(
+        "verify-latest", help="verify that a release lock is still latest stable"
+    )
 
     build_info = commands.add_parser("build-info", help="write build provenance")
     build_info.add_argument("--source-info", type=Path, required=True)
@@ -121,13 +131,14 @@ def command_version(command: list[str], cwd: Path | None = None) -> str:
 
 
 def write_build_info(
-    manifest_path: Path,
+    policy_path: Path,
+    release_lock_path: Path,
     source_info_path: Path,
     source_dir: Path,
     v8_build_path: Path,
     output: Path,
 ) -> None:
-    manifest = load_manifest(manifest_path)
+    manifest = load_manifest(policy_path, release_lock_path)
     source_info = read_json_object(source_info_path)
     if source_info.get("status") != "ready":
         raise ReleaseError("source-info is not ready")
@@ -150,6 +161,8 @@ def write_build_info(
     v8_input = v8_build["input"]
     build = {
         "schema_version": 1,
+        "policy_sha256": manifest.policy_sha256,
+        "release_lock_sha256": manifest.release_lock_sha256,
         "release_tag": manifest.release_tag,
         "package_version": manifest.package_version,
         "upstream": dataclasses.asdict(manifest.upstream),
@@ -184,7 +197,37 @@ def write_build_info(
 
 def main() -> int:
     args = parser().parse_args()
-    manifest = load_manifest(args.manifest)
+    policy_document = load_policy(args.policy)
+    if args.command == "validate-policy":
+        values = {
+            "target": policy_document.distribution.target,
+            "zig": policy_document.zig,
+            "patch_series_sha256": patch_series_digest(policy_document.patches_dir),
+            "policy_sha256": policy_document.sha256,
+        }
+        github_output(values)
+        print(json.dumps(values, indent=2, sort_keys=True))
+        return 0
+    if args.command == "resolve-latest":
+        manifest = resolve_latest_manifest(
+            policy_document, token=os.environ.get("GITHUB_TOKEN")
+        )
+        write_json(args.output, manifest.release_lock())
+        values = {
+            "release_tag": manifest.release_tag,
+            "package_version": manifest.package_version,
+            "upstream_commit": manifest.upstream.commit_sha,
+            "rust": manifest.toolchain.rust,
+            "zig": manifest.toolchain.zig,
+            "rusty_v8": manifest.toolchain.rusty_v8,
+            "release_lock_sha256": manifest.release_lock_sha256,
+        }
+        github_output(values)
+        print(json.dumps(values, indent=2, sort_keys=True))
+        return 0
+    if args.release_lock is None:
+        raise ReleaseError(f"{args.command} requires --release-lock")
+    manifest = load_manifest(args.policy, args.release_lock)
 
     if args.command == "validate":
         check_patch_scope(manifest.patches_dir)
@@ -196,6 +239,8 @@ def main() -> int:
             "zig": manifest.toolchain.zig,
             "rusty_v8": manifest.toolchain.rusty_v8,
             "patch_series_sha256": patch_series_digest(manifest.patches_dir),
+            "policy_sha256": manifest.policy_sha256,
+            "release_lock_sha256": manifest.release_lock_sha256,
         }
         github_output(values)
         print(
@@ -214,25 +259,13 @@ def main() -> int:
             report_path=args.report,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
-    elif args.command == "update-upstream":
-        changed, latest, toolchain = update_to_latest_stable(
-            manifest, token=os.environ.get("GITHUB_TOKEN")
-        )
-        values = {
-            "changed": str(changed).lower(),
-            "version": latest.version,
-            "tag": latest.tag,
-            "tag_object_sha": latest.tag_object_sha,
-            "commit_sha": latest.commit_sha,
-            "rust": toolchain.rust,
-            "zig": toolchain.zig,
-            "rusty_v8": toolchain.rusty_v8,
-        }
-        github_output(values)
-        print(json.dumps(values, indent=2, sort_keys=True))
+    elif args.command == "verify-latest":
+        verify_latest_manifest(manifest, token=os.environ.get("GITHUB_TOKEN"))
+        print(json.dumps({"release_tag": manifest.release_tag}, indent=2))
     elif args.command == "build-info":
         write_build_info(
-            args.manifest,
+            args.policy,
+            args.release_lock,
             args.source_info,
             args.source_dir,
             args.v8_build,

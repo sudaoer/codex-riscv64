@@ -7,25 +7,17 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: upstream-stable-watcher
   cancel-in-progress: false
 
 jobs:
-  update:
+  watch:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Mint updater GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ vars.UPDATER_APP_ID }}
-          private-key: ${{ secrets.UPDATER_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-
       - name: Check out downstream inputs
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -36,43 +28,31 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Update the stable manifest
-        id: upstream
+      - name: Resolve latest stable release
+        id: release
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 scripts/release.py update-upstream
-
-      - name: Commit fixed update branch
-        if: steps.upstream.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ steps.upstream.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          branch=automation/upstream-stable
-          gh auth setup-git
-          git config user.name codex-riscv64-updater[bot]
-          git config user.email codex-riscv64-updater[bot]@users.noreply.github.com
-          git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || true
-          git checkout -B "$branch"
-          git add release/upstream.toml
-          git commit -m "chore: follow Codex ${VERSION}"
-          git push --force-with-lease origin "HEAD:${branch}"
+          python3 scripts/release.py resolve-latest \
+            --output "${RUNNER_TEMP}/release-lock.json"
 
-      - name: Create or refresh update pull request
-        if: steps.upstream.outputs.changed == 'true'
+      - name: Check downstream release state
+        id: state
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ steps.upstream.outputs.version }}
-          TAG: ${{ steps.upstream.outputs.tag }}
-          COMMIT_SHA: ${{ steps.upstream.outputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
         run: |
-          branch=automation/upstream-stable
-          title="chore: follow Codex ${VERSION}"
-          body="Automated stable update to \`${TAG}\` (\`${COMMIT_SHA}\`).
-
-          Compatibility checks reconstruct the exact tag and apply the ordered patch series."
-          if gh pr view "$branch" >/dev/null 2>&1; then
-            gh pr edit "$branch" --title "$title" --body "$body"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
           else
-            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Trigger compatibility and build chain
+        if: steps.state.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run compat-check.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main

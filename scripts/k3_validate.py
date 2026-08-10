@@ -18,23 +18,25 @@ from typing import Any
 from release_lib import (
     ReleaseError,
     load_manifest,
+    load_policy,
     preflight_publish,
     read_json_object,
     validate_candidate,
     validate_candidate_run,
+    verify_latest_manifest,
     write_json,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "release" / "upstream.toml"
+DEFAULT_POLICY = ROOT / "release" / "policy.toml"
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--run-id", required=True)
     result.add_argument("--ssh-host", default="k3")
-    result.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    result.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     result.add_argument("--output", type=Path)
     result.add_argument("--skip-attestation", action="store_true")
     result.add_argument("--request-publish", action="store_true")
@@ -77,8 +79,11 @@ def main() -> int:
     args = parser().parse_args()
     if not args.run_id.isdigit():
         raise ReleaseError("--run-id must be numeric")
-    manifest = load_manifest(args.manifest)
-    repository = manifest.distribution.repository
+    policy_document = load_policy(args.policy)
+    repository = policy_document.distribution.repository
+    github_token = run(["gh", "auth", "token"], capture=True).stdout.strip()
+    if not github_token:
+        raise ReleaseError("gh did not return an authentication token")
     run_info = github_run(repository, args.run_id)
     validate_candidate_run(run_info, expected_run_id=args.run_id)
 
@@ -101,6 +106,10 @@ def main() -> int:
                 str(candidate_dir),
             ]
         )
+        manifest = load_manifest(
+            args.policy, candidate_dir / "release-lock.json"
+        )
+        verify_latest_manifest(manifest, token=github_token)
         candidate = validate_candidate(manifest, candidate_dir)
         validate_candidate_run(
             run_info,
@@ -175,6 +184,7 @@ def main() -> int:
             output,
             expected_run_id=args.run_id,
         )
+        verify_latest_manifest(manifest, token=github_token)
         print(f"K3 report: {output}")
 
         if args.request_publish:

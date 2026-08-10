@@ -68,15 +68,24 @@ jobs:
           RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" > run.json
-          python3 scripts/release.py validate-run \
+          python3 scripts/release.py \
+            --release-lock candidate/release-lock.json \
+            validate-run \
             --run-json run.json \
             --candidate-dir candidate \
             --run-id "$RUN_ID" >/dev/null
 
       - name: Verify candidate bytes and K3 report
         id: preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/release.py preflight \
+          python3 scripts/release.py \
+            --release-lock candidate/release-lock.json \
+            verify-latest >/dev/null
+          python3 scripts/release.py \
+            --release-lock candidate/release-lock.json \
+            preflight \
             --candidate-dir candidate \
             --k3-report k3-report.json \
             --run-id "${{ inputs.candidate_run_id }}" >/dev/null
@@ -117,8 +126,15 @@ jobs:
           path: promotion
 
       - name: Reverify exact bytes after approval
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/release.py preflight \
+          python3 scripts/release.py \
+            --release-lock promotion/candidate/release-lock.json \
+            verify-latest >/dev/null
+          python3 scripts/release.py \
+            --release-lock promotion/candidate/release-lock.json \
+            preflight \
             --candidate-dir promotion/candidate \
             --k3-report promotion/k3-report.json \
             --run-id "${{ inputs.candidate_run_id }}" >/dev/null

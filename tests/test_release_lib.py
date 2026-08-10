@@ -16,22 +16,27 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from release import write_build_info  # noqa: E402
 
 from release_lib import (  # noqa: E402
+    Manifest,
     REQUIRED_K3_TESTS,
     ReleaseError,
     Toolchain,
+    Upstream,
     build_spdx_document,
     check_patch_scope,
     finalize_candidate,
     finalize_v8_artifact,
     load_manifest,
+    load_policy,
+    normalize_release_cargo_lock,
     patch_series_digest,
     preflight_publish,
-    replace_manifest_values,
     required_payload_names,
+    resolve_latest_manifest,
     resolve_upstream_toolchain,
     validate_candidate,
     validate_candidate_run,
     validate_v8_artifact,
+    verify_latest_manifest,
     v8_artifact_names,
     v8_input_descriptor,
     v8_input_digest,
@@ -40,21 +45,46 @@ from release_lib import (  # noqa: E402
 )
 
 
+POLICY_PATH = ROOT / "release" / "policy.toml"
+
+
+def test_manifest() -> Manifest:
+    return Manifest(
+        policy_document=load_policy(POLICY_PATH),
+        upstream=Upstream(
+            repository="openai/codex",
+            version="1.2.3",
+            tag="rust-v1.2.3",
+            tag_object_sha="a" * 40,
+            commit_sha="b" * 40,
+        ),
+        toolchain=Toolchain(rust="1.96.0", zig="0.14.0", rusty_v8="151.2.3"),
+    )
+
+
 class ManifestTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.manifest = load_manifest(ROOT / "release" / "upstream.toml")
+        self.manifest = test_manifest()
 
-    def test_initial_release_identity_is_pinned(self) -> None:
-        self.assertEqual(self.manifest.release_tag, "riscv-v0.147.0-r1")
-        self.assertEqual(
-            self.manifest.upstream.commit_sha,
-            "be6e8eac029b183056b7e4402879f15d2c85f61b",
-        )
-        self.assertEqual(
-            patch_series_digest(self.manifest.patches_dir),
-            "86e47e0ad2c1b3d55ecb5aa33c13af7e68349e35d5b774d012f607ef8e2a018b",
-        )
+    def test_policy_has_no_codex_version(self) -> None:
+        policy = POLICY_PATH.read_text()
+        self.assertNotIn("\nversion =", policy)
+        self.assertNotIn("tag =", policy)
+        self.assertNotIn("commit_sha", policy)
+        self.assertEqual(self.manifest.release_tag, "riscv-v1.2.3-r1")
         check_patch_scope(self.manifest.patches_dir)
+
+    def test_policy_rejects_upstream_version_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.toml"
+            path.write_text(
+                POLICY_PATH.read_text().replace(
+                    '[upstream]\nrepository = "openai/codex"',
+                    '[upstream]\nrepository = "openai/codex"\nversion = "1.2.3"',
+                )
+            )
+            with self.assertRaisesRegex(ReleaseError, "only repository"):
+                load_policy(path)
 
     def test_workflows_check_the_full_locked_target_graph(self) -> None:
         for workflow_name in ("compat-check.yml", "candidate-build.yml"):
@@ -66,6 +96,7 @@ class ManifestTests(unittest.TestCase):
 
         candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
         self.assertNotIn("toolchain: ${{ steps.policy.outputs.rust }}", candidate)
+        self.assertIn("rustup toolchain install", candidate)
 
     def test_v8_and_candidate_workflows_are_separate(self) -> None:
         candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
@@ -75,6 +106,7 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("gh attestation verify", candidate)
         self.assertIn("validate-v8", candidate)
         self.assertIn("v8-handoff.json", candidate)
+        self.assertIn("release-lock.json", candidate)
         self.assertNotIn("WORKFLOW_RUN_SHA", candidate)
         self.assertNotIn("setup-bazel@", candidate)
         self.assertNotIn("run_bazel_with_buildbuddy.py", candidate)
@@ -83,29 +115,18 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("gh release create", v8)
         self.assertIn("actions/attest@", v8)
         self.assertIn("v8-handoff.json", v8)
+        self.assertIn("release-lock.json", v8)
         candidate_script = (ROOT / "scripts/build_candidate.sh").read_text()
         v8_script = (ROOT / "scripts/build_v8.sh").read_text()
         self.assertNotIn("run_bazel_with_buildbuddy.py", candidate_script)
         self.assertIn("run_bazel_with_buildbuddy.py", v8_script)
         self.assertIn("validate-v8", candidate_script)
 
-    def test_manifest_update_replaces_only_named_keys(self) -> None:
+    def test_release_lock_round_trip_is_canonical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "upstream.toml"
-            path.write_text(
-                "[distribution]\nrevision = 9\n\n[upstream]\nversion = \"1.2.3\"\n"
-            )
-            replace_manifest_values(
-                path,
-                {
-                    ("distribution", "revision"): 1,
-                    ("upstream", "version"): "2.0.0",
-                },
-            )
-            self.assertEqual(
-                path.read_text(),
-                "[distribution]\nrevision = 1\n\n[upstream]\nversion = \"2.0.0\"\n",
-            )
+            path = Path(directory) / "release-lock.json"
+            write_json(path, self.manifest.release_lock())
+            self.assertEqual(load_manifest(POLICY_PATH, path), self.manifest)
 
     def test_upstream_toolchain_is_derived_from_pinned_source(self) -> None:
         files = {
@@ -120,23 +141,101 @@ class ManifestTests(unittest.TestCase):
         ):
             resolved = resolve_upstream_toolchain(
                 self.manifest.upstream,
-                self.manifest.toolchain,
+                self.manifest.toolchain.zig,
             )
         self.assertEqual(
             resolved,
             Toolchain(rust="1.96.0", zig="0.14.0", rusty_v8="151.2.3"),
         )
 
+    def test_latest_resolution_freezes_one_canonical_lock(self) -> None:
+        policy = load_policy(POLICY_PATH)
+        with (
+            patch("release_lib.resolve_latest_stable", return_value=self.manifest.upstream),
+            patch(
+                "release_lib.resolve_upstream_toolchain",
+                return_value=self.manifest.toolchain,
+            ),
+        ):
+            resolved = resolve_latest_manifest(policy)
+        self.assertEqual(resolved.release_lock(), self.manifest.release_lock())
+
+    def test_latest_verification_rejects_a_newer_release(self) -> None:
+        newer = Manifest(
+            policy_document=self.manifest.policy_document,
+            upstream=Upstream(
+                repository="openai/codex",
+                version="1.2.4",
+                tag="rust-v1.2.4",
+                tag_object_sha="c" * 40,
+                commit_sha="d" * 40,
+            ),
+            toolchain=self.manifest.toolchain,
+        )
+        with (
+            patch("release_lib.resolve_latest_manifest", return_value=newer),
+            self.assertRaisesRegex(ReleaseError, "no longer latest stable"),
+        ):
+            verify_latest_manifest(self.manifest)
+
+
+class CargoLockNormalizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.source = Path(self.temporary.name)
+        cargo = self.source / "codex-rs"
+        cargo.mkdir()
+        (cargo / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["one", "two"]\n\n'
+            '[workspace.package]\nversion = "1.2.3"\n'
+        )
+        for directory, name in (("one", "crate-one"), ("two", "crate-two")):
+            member = cargo / directory
+            member.mkdir()
+            (member / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion.workspace = true\n'
+            )
+        self.lock = cargo / "Cargo.lock"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_lock(self, first: str, second: str) -> None:
+        self.lock.write_text(
+            "version = 4\n\n"
+            "[[package]]\nname = \"crate-one\"\n"
+            f'version = "{first}"\n\n'
+            "[[package]]\nname = \"crate-two\"\n"
+            f'version = "{second}"\n'
+        )
+
+    def test_normalizes_only_stale_workspace_versions(self) -> None:
+        self.write_lock("0.0.0", "1.2.3")
+        result = normalize_release_cargo_lock(self.source, "1.2.3")
+        self.assertEqual(result["changed_package_count"], 1)
+        self.assertEqual(self.lock.read_text().count('version = "1.2.3"'), 2)
+        repeated = normalize_release_cargo_lock(self.source, "1.2.3")
+        self.assertEqual(repeated["changed_package_count"], 0)
+        self.assertEqual(repeated["before_sha256"], repeated["after_sha256"])
+
+    def test_rejects_unexpected_workspace_lock_version(self) -> None:
+        self.write_lock("9.9.9", "0.0.0")
+        with self.assertRaisesRegex(ReleaseError, "unexpected workspace lock versions"):
+            normalize_release_cargo_lock(self.source, "1.2.3")
+
 
 class CandidateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.manifest = load_manifest(ROOT / "release" / "upstream.toml")
+        self.manifest = test_manifest()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.candidate_dir = self.root / "candidate"
         self.candidate_dir.mkdir()
         for name in required_payload_names(self.manifest):
             (self.candidate_dir / name).write_bytes(f"asset:{name}\n".encode())
+        write_json(
+            self.candidate_dir / "release-lock.json", self.manifest.release_lock()
+        )
         self.source_info = self.root / "source-info.json"
         write_json(
             self.source_info,
@@ -145,6 +244,8 @@ class CandidateTests(unittest.TestCase):
                 "status": "ready",
                 "upstream_commit_sha": self.manifest.upstream.commit_sha,
                 "downstream_commit_sha": "1" * 40,
+                "policy_sha256": self.manifest.policy_sha256,
+                "release_lock_sha256": self.manifest.release_lock_sha256,
             },
         )
         self.now = dt.datetime(2026, 8, 9, 8, 0, tzinfo=dt.timezone.utc)
@@ -212,6 +313,7 @@ class CandidateTests(unittest.TestCase):
         dirty.mkdir()
         for name in required_payload_names(self.manifest):
             (dirty / name).write_bytes(f"asset:{name}\n".encode())
+        write_json(dirty / "release-lock.json", self.manifest.release_lock())
         (dirty / "debug.bin").write_bytes(b"not sealed")
         with self.assertRaisesRegex(ReleaseError, "unsealed candidate payload"):
             finalize_candidate(
@@ -250,7 +352,7 @@ class CandidateTests(unittest.TestCase):
 
 class V8ArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.manifest = load_manifest(ROOT / "release" / "upstream.toml")
+        self.manifest = test_manifest()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
@@ -344,9 +446,13 @@ class V8ArtifactTests(unittest.TestCase):
                 "schema_version": 1,
                 "status": "ready",
                 "upstream_commit_sha": self.manifest.upstream.commit_sha,
+                "policy_sha256": self.manifest.policy_sha256,
+                "release_lock_sha256": self.manifest.release_lock_sha256,
             },
         )
         output = self.root / "build-info.json"
+        release_lock = self.root / "release-lock.json"
+        write_json(release_lock, self.manifest.release_lock())
 
         def version(command: list[str], cwd: Path | None = None) -> str:
             del cwd
@@ -362,7 +468,8 @@ class V8ArtifactTests(unittest.TestCase):
 
         with patch("release.command_version", side_effect=version):
             write_build_info(
-                ROOT / "release" / "upstream.toml",
+                POLICY_PATH,
+                release_lock,
                 source_info,
                 self.source,
                 self.v8_dir / "v8-build.json",
@@ -396,7 +503,7 @@ class SbomTests(unittest.TestCase):
         self.assertEqual(document["packages"][1]["licenseDeclared"], "NOASSERTION")
 
     def test_spdx_merges_ripgrep_dependency_graph(self) -> None:
-        codex_id = "path+file:///source/codex#codex-cli@0.147.0"
+        codex_id = "path+file:///source/codex#codex-cli@1.2.3"
         ripgrep_id = "registry+https://github.com/rust-lang/crates.io-index#ripgrep@15.2.0"
         pcre2_id = "registry+https://github.com/rust-lang/crates.io-index#pcre2@0.2.11"
         codex = {
@@ -404,7 +511,7 @@ class SbomTests(unittest.TestCase):
                 {
                     "id": codex_id,
                     "name": "codex-cli",
-                    "version": "0.147.0",
+                    "version": "1.2.3",
                     "license": "Apache-2.0",
                     "source": None,
                 }
