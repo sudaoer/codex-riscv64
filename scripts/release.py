@@ -7,12 +7,15 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 from release_lib import (
     ReleaseError,
     build_spdx_document,
     check_patch_scope,
+    check_release_state,
+    decide_build_required,
     finalize_candidate,
     finalize_v8_artifact,
     github_output,
@@ -49,6 +52,26 @@ def parser() -> argparse.ArgumentParser:
 
     commands.add_parser("validate-policy", help="validate the version-free policy")
     commands.add_parser("validate", help="validate the policy and release lock")
+
+    release_state = commands.add_parser(
+        "release-state", help="check and verify the formal downstream release"
+    )
+    release_state.add_argument(
+        "--download-dir",
+        type=Path,
+        help="directory for downloaded release assets (temporary by default)",
+    )
+
+    decide_build = commands.add_parser(
+        "decide-build", help="decide whether a Candidate build is required"
+    )
+    decide_build.add_argument("--event-name", required=True)
+    decide_build.add_argument(
+        "--force-rebuild", choices=("true", "false"), required=True
+    )
+    decide_build.add_argument(
+        "--release-hit", choices=("true", "false"), required=True
+    )
 
     prepare = commands.add_parser("prepare", help="reconstruct patched upstream source")
     prepare.add_argument("--source-dir", type=Path, required=True)
@@ -225,10 +248,49 @@ def main() -> int:
         github_output(values)
         print(json.dumps(values, indent=2, sort_keys=True))
         return 0
+    if args.command == "decide-build":
+        build_required, reason = decide_build_required(
+            args.event_name,
+            args.force_rebuild == "true",
+            args.release_hit == "true",
+        )
+        github_output(
+            {
+                "build_required": "true" if build_required else "false",
+                "reason": reason,
+            }
+        )
+        print(
+            json.dumps(
+                {"build_required": build_required, "reason": reason},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.release_lock is None:
         raise ReleaseError(f"{args.command} requires --release-lock")
     manifest = load_manifest(args.policy, args.release_lock)
 
+    if args.command == "release-state":
+        state = check_release_state(
+            manifest,
+            token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
+            download_dir=args.download_dir,
+        )
+        release_url = (
+            f"https://github.com/{manifest.distribution.repository}"
+            f"/releases/tag/{urllib.parse.quote(manifest.release_tag, safe='')}"
+        )
+        github_output(
+            {
+                "hit": "true" if state["exists"] else "false",
+                "release_tag": manifest.release_tag,
+                "release_url": release_url,
+            }
+        )
+        print(json.dumps(state, indent=2, sort_keys=True))
+        return 0
     if args.command == "validate":
         check_patch_scope(manifest.patches_dir)
         values = {
