@@ -1,30 +1,65 @@
-# Unofficial Codex builds for Linux/riscv64
+# 非官方 Codex Linux/riscv64 构建 | Unofficial Codex Builds for Linux/riscv64
 
-This repository follows stable releases of
-[`openai/codex`](https://github.com/openai/codex), applies a small RISC-V patch
-series, cross-builds `riscv64gc-unknown-linux-musl` packages, and publishes the
-exact candidate bytes that passed native validation.
+## 这是什么？ / What is this?
 
-This is an **unofficial downstream distribution**. It is not produced,
-endorsed, signed, or supported by OpenAI.
+这是面向 Linux/riscv64 的非官方 OpenAI Codex 下游发行版。项目跟随
+[OpenAI Codex](https://github.com/openai/codex) 的稳定版本，提供可直接安装的
+RISC-V 构建包。
 
-## Release flow
+This is an unofficial downstream distribution of OpenAI Codex for Linux/riscv64.
+It follows stable versions of [OpenAI Codex](https://github.com/openai/codex) and
+provides ready-to-install RISC-V packages.
 
-```text
-resolve latest stable -> immutable release lock -> compatibility checks
-  -> immutable V8 resolve/build -> candidate build -> local K3 validation
-  -> protected environment approval -> GitHub Release
-```
+本项目不是由 OpenAI 制作、背书、签名或支持的。请在使用前阅读
+[最新 Release](https://github.com/sudaoer/codex-riscv64/releases/latest) 和
+[安全策略](./SECURITY.md)。
 
-The repository does not pin a Codex version. Every build chain resolves the
-current stable `rust-vX.Y.Z` release once, records the annotated tag object,
-peeled commit, Rust toolchain, and `rusty_v8` version in `release-lock.json`,
-and carries that exact lock through every later stage. Alpha builds and
-arbitrary commits are rejected from the stable channel.
+This project is not produced, endorsed, signed, or supported by OpenAI. Before
+installing, review the [latest Release](https://github.com/sudaoer/codex-riscv64/releases/latest)
+and the [security policy](./SECURITY.md).
 
-## Install
+## 支持范围 / Support scope
 
-After the first release is published:
+当前稳定发布目标是 `riscv64gc-unknown-linux-musl`，CPU 基线为 RV64GC。也就是
+说，主机应运行 Linux，并且 RISC-V 处理器应实现 RV64GC。
+
+The current stable release target is `riscv64gc-unknown-linux-musl`, with an
+RV64GC CPU baseline. The host must run Linux, and the RISC-V processor should
+implement RV64GC.
+
+稳定发布目前只覆盖以下范围：
+
+- Linux/riscv64；
+- `riscv64gc-unknown-linux-musl` 软件包；
+- 通过 GitHub Release 分发的预编译版本。
+
+Stable releases currently cover only:
+
+- Linux/riscv64;
+- the `riscv64gc-unknown-linux-musl` packages;
+- prebuilt versions distributed through GitHub Releases.
+
+本项目当前不对 GNU/glibc 目标、RVA23/RVV 构建或 RISC-V npm 包作稳定支持承诺。
+
+This project currently makes no stable-support promise for GNU/glibc targets,
+RVA23/RVV builds, or RISC-V npm packages.
+
+## 快速安装 / Quick install
+
+请先确认主机已经安装 `curl`、`python3`、`tar` 和 `sha256sum`。远程安装器会检查
+操作系统和机器架构，然后下载 Release 元数据与主安装包，校验文件大小和 SHA-256，
+再检查归档路径是否安全。
+
+Make sure the host has `curl`, `python3`, `tar`, and `sha256sum`. The remote
+installer checks the operating system and machine architecture, downloads the
+Release metadata and primary package, verifies the size and SHA-256 digest, and
+checks the archive paths for safety.
+
+在 [Releases](https://github.com/sudaoer/codex-riscv64/releases) 页面已有可用版本时，
+运行：
+
+When a release is available on the [Releases](https://github.com/sudaoer/codex-riscv64/releases)
+page, run:
 
 ```sh
 curl -fsSL \
@@ -32,116 +67,156 @@ curl -fsSL \
   | sh
 ```
 
-The installer uses the standalone layout under
-`~/.codex/packages/standalone`, keeps old versions for rollback, atomically
-updates `current`, and places `codex` in `~/.local/bin` by default.
+安装器默认会：
 
-## Maintainer commands
+- 将版本安装到 `~/.codex/packages/standalone`；
+- 在 `~/.local/bin/codex` 创建指向当前版本的链接；
+- 保留已经安装的旧版本，便于回滚；
+- 原子地切换 `current` 指向新版本。
 
-```sh
-# Validate the version-free policy.
-python3 scripts/release.py validate-policy
+By default, the installer will:
 
-# Resolve the current stable upstream release without changing the repository.
-python3 scripts/release.py resolve-latest --output /tmp/release-lock.json
+- install releases under `~/.codex/packages/standalone`;
+- create `~/.local/bin/codex` as a link to the current version;
+- keep previously installed versions for rollback;
+- atomically switch `current` to the new version.
 
-# Validate the resolved release identity and patch policy.
-python3 scripts/release.py \
-  --release-lock /tmp/release-lock.json \
-  validate
+如果 `~/.local/bin` 尚未加入 `PATH`，可以先在当前 shell 中执行：
 
-# Reconstruct the downstream source from an exact upstream tag.
-python3 scripts/release.py \
-  --release-lock /tmp/release-lock.json \
-  prepare \
-  --source-dir .work/source \
-  --upstream-url https://github.com/openai/codex.git
-
-# Run release-tool tests.
-python3 -m unittest discover -s tests -v
-
-# Validate an Actions candidate on the configured SSH host and request publish.
-python3 scripts/k3_validate.py --run-id RUN_ID --ssh-host k3 --request-publish
-```
-
-The release workflows, policy, generated release lock, and patch series are the
-authoritative build inputs. The existing full fork is only a patch-development
-workspace.
-
-## One-time GitHub configuration
-
-1. Create the public `sudaoer/codex-riscv64` repository and push this thin
-   repository with `main` as the default branch.
-2. Create a protected environment named `release`, add required reviewers, and
-   restrict its deployment branch to `main`. The publish job cannot run until
-   this environment is approved.
-3. Protect `main`: require pull requests and the `Compatibility check / check`
-   status. Keep the default workflow token read-only; individual jobs request
-   only the extra permissions they need.
-
-Do not add an SSH key for K3 to GitHub. Native validation is deliberately
-initiated from the maintainer workstation, so an untrusted GitHub runner never
-receives access to the machine.
-
-## Maintenance model
-
-The stable watcher runs daily, resolves the latest stable upstream identity,
-and checks for its downstream release tag. When that release is missing it
-dispatches the compatibility/build chain with the repository workflow token;
-it never writes a version file or update branch. Zig remains a
-downstream-controlled toolchain pin. A patch conflict, lock normalization
-failure, or focused upstream test failure blocks the build instead of silently
-dropping a patch.
-
-`distribution.revision` is the downstream rebuild counter. Leave it at `1`
-for the first build of each upstream version and increment it only when a new
-downstream release of the same upstream version is required.
-
-Release tags sometimes carry workspace package versions in `Cargo.toml` while
-their checked-in `Cargo.lock` still contains the development placeholder
-`0.0.0`. Source preparation handles this without a version-specific patch: it
-updates only source-less workspace members that declare
-`version.workspace = true`, commits that normalization deterministically, and
-rejects every other unexpected version transition.
-
-After `main` passes compatibility checks, the V8 workflow derives a SHA-256
-identity from the actual Bazel/V8/LLVM/libc++ inputs. It reuses the matching
-attested prerelease when it exists, otherwise it builds and publishes that
-immutable V8 pair once. Candidate build independently derives the same key,
-downloads and verifies all four V8 release assets, then builds an immutable
-14-day Actions artifact without rebuilding V8. A Codex update that does not
-change those V8 inputs reuses the same release even if other Cargo lock entries
-changed.
-
-On the maintainer workstation:
+If `~/.local/bin` is not already on `PATH`, run this in the current shell first:
 
 ```sh
-python3 scripts/k3_validate.py --run-id RUN_ID --ssh-host k3
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Inspect the JSON under `analysis/`, then request the protected publish step:
+要安装 Release 页面中的指定版本，可将 `TAG` 替换为实际的
+`riscv-vX.Y.Z-rN` 标签：
+
+To install a specific version from the Releases page, replace `TAG` with the
+actual `riscv-vX.Y.Z-rN` tag:
 
 ```sh
-python3 scripts/k3_validate.py \
-  --run-id RUN_ID \
-  --ssh-host k3 \
-  --request-publish
+curl -fsSL \
+  https://github.com/sudaoer/codex-riscv64/releases/latest/download/install.sh \
+  | sh -s -- --version TAG
 ```
 
-Publish downloads the selected candidate by run ID, revalidates every byte and
-the K3 evidence both before and after environment approval, and verifies that
-the carried lock is still the current upstream stable release. It then creates
-a draft, checks the remote asset set, and only then makes the release public.
-Existing tags or releases are never overwritten.
+## 首次运行 / First run
 
-## Published assets
+安装完成后，先确认版本并启动交互界面：
 
-Each release contains primary and app-server packages, the responses proxy,
-the exact `rusty_v8` archive and binding, checksums, build metadata, SPDX SBOM,
-K3 evidence, license notices, and the installer. GitHub artifact attestations
-bind build outputs to the candidate workflow and source revision. Build
-metadata also records the immutable V8 input digest, release tag, asset map,
-V8 builder identity, and resolved `release-lock.json`.
+After installation, check the version and start the interactive interface:
 
-Version 1 intentionally does not publish npm packages. RVA23/RVV builds remain
-experimental and cannot pass the stable policy.
+```sh
+codex --version
+codex
+```
+
+也可以直接附带一个初始提示：
+
+You can also provide an initial prompt directly:
+
+```sh
+codex "解释当前目录中的代码"
+```
+
+首次使用时可以选择 **Sign in with ChatGPT**。如果要使用 API key，请参阅
+[Codex 认证文档](https://developers.openai.com/codex/auth)。登录方式和账户权限由
+上游 Codex 决定，本项目不会替换 OpenAI 的认证流程。
+
+On first use, choose **Sign in with ChatGPT**. To use an API key, see the
+[Codex authentication documentation](https://developers.openai.com/codex/auth).
+Authentication methods and account permissions are determined by upstream Codex;
+this project does not replace OpenAI's authentication flow.
+
+## 安装内容 / What's included
+
+一键安装使用主包
+`codex-package-riscv64gc-unknown-linux-musl.tar.gz`。主包至少包含：
+
+The one-command installer uses the primary package
+`codex-package-riscv64gc-unknown-linux-musl.tar.gz`. It includes at least:
+
+- `bin/codex`：Codex CLI；
+- `bin/codex-code-mode-host`：Code Mode 主机程序；
+- `codex-resources/bwrap`：随包提供的 Linux sandbox helper；
+- `codex-path/rg`：随包提供并启用 PCRE2 的 ripgrep。
+
+- `bin/codex`: the Codex CLI;
+- `bin/codex-code-mode-host`: the Code Mode host;
+- `codex-resources/bwrap`: the bundled Linux sandbox helper;
+- `codex-path/rg`: bundled ripgrep with PCRE2 enabled.
+
+Release 页面还会单独提供 app-server 包和 Responses API proxy 包。它们适用于相应的
+高级场景，不是普通 CLI 安装的必需品；请从 Release 页面下载与目标匹配的资产。
+
+The Release page also provides separate app-server and Responses API proxy packages.
+They are for their respective advanced use cases and are not required for a normal
+CLI installation; download the asset matching your target from the Release page.
+
+已发布的稳定包会在 RISC-V Linux 主机上进行原生验证，包括 CLI、sandbox、Code Mode
+通信、内置 `bwrap` 和 PCRE2 ripgrep 的基本检查。
+
+Published stable packages are natively checked on a RISC-V Linux host, including
+basic checks of the CLI, sandbox, Code Mode communication, bundled `bwrap`, and
+PCRE2 ripgrep.
+
+## 限制与排查 / Limitations and troubleshooting
+
+Code Mode 和 sandbox 都包含在主包中，但 sandbox 是否能正常运行仍取决于 Linux
+内核是否允许所需的 user/PID namespace。如果启动 sandbox 时失败，请先检查：
+
+Code Mode and the sandbox are included in the primary package, but sandbox
+execution still depends on the Linux kernel allowing the required user and PID
+namespaces. If sandbox startup fails, check:
+
+```sh
+uname -s
+uname -m
+command -v curl python3 tar sha256sum
+```
+
+在采用 Sv39 的内核上，V8 可能无法预留理想的 128 GiB sandbox 地址空间。Code Mode
+仍然可用，但地址空间隔离强度会低于能够完成完整预留的主机；对隔离强度有严格要求
+时，应把主机内核能力纳入评估。
+
+On a host using an Sv39 kernel, V8 may be unable to reserve its ideal 128 GiB
+sandbox address space. Code Mode remains available, but address-space isolation
+is weaker than on a host that can complete the full reservation. If strong
+isolation is required, include the host kernel capabilities in your evaluation.
+
+如果 shell 找不到 `codex`，通常是 `~/.local/bin` 不在 `PATH` 中；如果安装器报告
+架构错误，请确认 `uname -s` 为 `Linux` 且 `uname -m` 为 `riscv64`。如果最新 Release
+暂时不可用，请先查看 [Releases 页面](https://github.com/sudaoer/codex-riscv64/releases)。
+
+If the shell cannot find `codex`, `~/.local/bin` is usually missing from `PATH`. If
+the installer reports an architecture error, confirm that `uname -s` is `Linux` and
+`uname -m` is `riscv64`. If the latest Release is temporarily unavailable, check
+the [Releases page](https://github.com/sudaoer/codex-riscv64/releases) first.
+
+## 安全、来源与许可 / Security, provenance, and license
+
+这是非官方下游构建，OpenAI 不对这些二进制文件提供背书或支持。当前只支持最新的
+已发布下游版本；上游安全修复需要经过下游补丁、构建和原生验证后才会出现在这里。
+
+These are unofficial downstream builds, and OpenAI does not endorse or support
+these binaries. Only the latest published downstream release is supported here;
+upstream security fixes appear only after downstream patching, building, and native
+validation succeed.
+
+安全问题请按照 [安全策略](./SECURITY.md) 私下报告，不要在公开 Issue 中披露可能影响
+发布完整性、安装器或 sandbox 的问题。项目许可见 [LICENSE](./LICENSE)。
+
+Report security issues privately according to the [security policy](./SECURITY.md)
+rather than disclosing possible release-integrity, installer, or sandbox issues in
+a public issue. See [LICENSE](./LICENSE) for the project license.
+
+## 开发与维护 / Development and maintenance
+
+本 README 只面向使用者。需要查看下游补丁或发布实现时，请阅读
+[patch series](./patches/) 和 [release workflows](./.github/workflows/)；维护过程中的
+构建结论记录在 [`analysis/`](./analysis/) 中。
+
+This README is user-focused. To inspect downstream patches or release
+implementation, see the [patch series](./patches/) and [release workflows](./.github/workflows/);
+build and release findings are recorded under [`analysis/`](./analysis/).
