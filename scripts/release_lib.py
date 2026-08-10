@@ -47,6 +47,7 @@ V8_INPUT_DIRECTORIES = (
     "patches",
     "third_party/v8",
 )
+SOURCE_NORMALIZATION_REVISION = 1
 REQUIRED_K3_TESTS = (
     "installer",
     "codex-version",
@@ -99,24 +100,12 @@ class Policy:
 
 
 @dataclasses.dataclass(frozen=True)
-class Manifest:
+class PolicyDocument:
     path: Path
     distribution: Distribution
-    upstream: Upstream
-    toolchain: Toolchain
+    upstream_repository: str
+    zig: str
     policy: Policy
-
-    @property
-    def release_tag(self) -> str:
-        return (
-            f"riscv-v{self.upstream.version}-r{self.distribution.revision}"
-        )
-
-    @property
-    def package_version(self) -> str:
-        return (
-            f"{self.upstream.version}-riscv.{self.distribution.revision}"
-        )
 
     @property
     def repository_root(self) -> Path:
@@ -125,6 +114,10 @@ class Manifest:
     @property
     def patches_dir(self) -> Path:
         return self.repository_root / "patches"
+
+    @property
+    def sha256(self) -> str:
+        return sha256_file(self.path)
 
     def validate(self) -> None:
         errors: list[str] = []
@@ -140,7 +133,84 @@ class Manifest:
             errors.append("candidate retention must cover the seven-day K3 window")
         if not 1 <= self.distribution.k3_report_max_age_days <= 7:
             errors.append("K3 report age must be between one and seven days")
-        if self.upstream.repository != "openai/codex":
+        if self.upstream_repository != "openai/codex":
+            errors.append("upstream repository must be openai/codex")
+        if VERSION_RE.fullmatch(self.zig) is None:
+            errors.append("toolchain.zig must be an exact X.Y.Z version")
+        if self.policy.cpu_baseline != "rv64gc":
+            errors.append("stable CPU baseline must remain rv64gc")
+        if self.policy.allow_rvv:
+            errors.append("stable releases must not require RVV")
+        if self.policy.release_profile != "release":
+            errors.append("stable releases must use the release profile")
+        if self.policy.v8_profile != "ptrcomp_sandbox_release":
+            errors.append("stable code mode must use sandboxed rusty_v8")
+        if errors:
+            raise ReleaseError("; ".join(errors))
+        patch_files(self.patches_dir)
+
+
+@dataclasses.dataclass(frozen=True)
+class Manifest:
+    policy_document: PolicyDocument
+    upstream: Upstream
+    toolchain: Toolchain
+
+    @property
+    def path(self) -> Path:
+        return self.policy_document.path
+
+    @property
+    def distribution(self) -> Distribution:
+        return self.policy_document.distribution
+
+    @property
+    def policy(self) -> Policy:
+        return self.policy_document.policy
+
+    @property
+    def policy_sha256(self) -> str:
+        return self.policy_document.sha256
+
+    @property
+    def release_tag(self) -> str:
+        return (
+            f"riscv-v{self.upstream.version}-r{self.distribution.revision}"
+        )
+
+    @property
+    def package_version(self) -> str:
+        return (
+            f"{self.upstream.version}-riscv.{self.distribution.revision}"
+        )
+
+    @property
+    def repository_root(self) -> Path:
+        return self.policy_document.repository_root
+
+    @property
+    def patches_dir(self) -> Path:
+        return self.policy_document.patches_dir
+
+    def release_lock(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "policy_sha256": self.policy_sha256,
+            "upstream": dataclasses.asdict(self.upstream),
+            "toolchain": dataclasses.asdict(self.toolchain),
+        }
+
+    @property
+    def release_lock_sha256(self) -> str:
+        encoded = json.dumps(
+            self.release_lock(), sort_keys=True, separators=(",", ":")
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    def validate(self) -> None:
+        errors: list[str] = []
+        self.policy_document.validate()
+        if self.upstream.repository != self.policy_document.upstream_repository:
             errors.append("upstream repository must be openai/codex")
         tag_match = TAG_RE.fullmatch(self.upstream.tag)
         if tag_match is None or tag_match.group(1) != self.upstream.version:
@@ -153,41 +223,77 @@ class Manifest:
         ):
             if SHA_RE.fullmatch(value) is None:
                 errors.append(f"upstream.{field_name} must be a lowercase Git SHA")
-        if self.policy.cpu_baseline != "rv64gc":
-            errors.append("stable CPU baseline must remain rv64gc")
-        if self.policy.allow_rvv:
-            errors.append("stable releases must not require RVV")
-        if self.policy.release_profile != "release":
-            errors.append("stable releases must use the release profile")
-        if self.policy.v8_profile != "ptrcomp_sandbox_release":
-            errors.append("stable code mode must use sandboxed rusty_v8")
         for field_name, value in dataclasses.asdict(self.toolchain).items():
             if VERSION_RE.fullmatch(value) is None:
                 errors.append(f"toolchain.{field_name} must be an exact X.Y.Z version")
+        if self.toolchain.zig != self.policy_document.zig:
+            errors.append("release lock Zig version does not match policy")
         if errors:
             raise ReleaseError("; ".join(errors))
-        patch_files(self.patches_dir)
 
 
-def load_manifest(path: Path) -> Manifest:
+def load_policy(path: Path) -> PolicyDocument:
     path = path.resolve()
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
-        raise ReleaseError(f"cannot read manifest {path}: {error}") from error
+        raise ReleaseError(f"cannot read policy {path}: {error}") from error
     if raw.get("schema_version") != SCHEMA_VERSION:
-        raise ReleaseError(f"unsupported manifest schema in {path}")
+        raise ReleaseError(f"unsupported policy schema in {path}")
+    expected_sections = {
+        "schema_version",
+        "distribution",
+        "upstream",
+        "toolchain",
+        "policy",
+    }
+    if set(raw) != expected_sections:
+        raise ReleaseError("release policy has unexpected sections")
+    if not isinstance(raw["upstream"], dict) or set(raw["upstream"]) != {
+        "repository"
+    }:
+        raise ReleaseError("release policy upstream may contain only repository")
+    if not isinstance(raw["toolchain"], dict) or set(raw["toolchain"]) != {"zig"}:
+        raise ReleaseError("release policy toolchain may contain only zig")
     try:
-        manifest = Manifest(
+        document = PolicyDocument(
             path=path,
             distribution=Distribution(**raw["distribution"]),
-            upstream=Upstream(**raw["upstream"]),
-            toolchain=Toolchain(**raw["toolchain"]),
+            upstream_repository=raw["upstream"]["repository"],
+            zig=raw["toolchain"]["zig"],
             policy=Policy(**raw["policy"]),
         )
     except (KeyError, TypeError) as error:
-        raise ReleaseError(f"invalid manifest shape in {path}: {error}") from error
+        raise ReleaseError(f"invalid policy shape in {path}: {error}") from error
+    document.validate()
+    return document
+
+
+def load_manifest(policy_path: Path, release_lock_path: Path) -> Manifest:
+    policy_document = load_policy(policy_path)
+    release_lock = read_json_object(release_lock_path)
+    if release_lock.get("schema_version") != SCHEMA_VERSION:
+        raise ReleaseError("release lock schema is unsupported")
+    if set(release_lock) != {
+        "schema_version",
+        "policy_sha256",
+        "upstream",
+        "toolchain",
+    }:
+        raise ReleaseError("release lock has unexpected fields")
+    if release_lock.get("policy_sha256") != policy_document.sha256:
+        raise ReleaseError("release lock policy digest does not match policy")
+    try:
+        manifest = Manifest(
+            policy_document=policy_document,
+            upstream=Upstream(**release_lock["upstream"]),
+            toolchain=Toolchain(**release_lock["toolchain"]),
+        )
+    except (KeyError, TypeError) as error:
+        raise ReleaseError(f"invalid release lock shape: {error}") from error
     manifest.validate()
+    if release_lock != manifest.release_lock():
+        raise ReleaseError("release lock is not canonical")
     return manifest
 
 
@@ -276,6 +382,163 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def _workspace_versioned_packages(cargo_root: Path) -> tuple[str, set[str]]:
+    root_manifest_path = cargo_root / "Cargo.toml"
+    try:
+        root_manifest = tomllib.loads(root_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ReleaseError(f"cannot read Cargo workspace manifest: {error}") from error
+    workspace = root_manifest.get("workspace")
+    if not isinstance(workspace, dict):
+        raise ReleaseError("Cargo workspace manifest has no [workspace] table")
+    workspace_package = workspace.get("package")
+    if not isinstance(workspace_package, dict):
+        raise ReleaseError("Cargo workspace manifest has no [workspace.package] table")
+    version = workspace_package.get("version")
+    if not isinstance(version, str) or VERSION_RE.fullmatch(version) is None:
+        raise ReleaseError("Cargo workspace version is not an exact stable version")
+    # Cargo also treats in-tree path dependencies as workspace members even when
+    # they are omitted from the explicit `members` list. Scan manifests that
+    # inherit the workspace version so release-only helper crates are included.
+    manifest_paths = {
+        path
+        for path in cargo_root.rglob("Cargo.toml")
+        if path != root_manifest_path
+        and not any(part in {".git", "target"} for part in path.parts)
+    }
+
+    names: set[str] = set()
+    for manifest_path in sorted(manifest_paths):
+        try:
+            package = tomllib.loads(
+                manifest_path.read_text(encoding="utf-8")
+            ).get("package")
+        except (OSError, tomllib.TOMLDecodeError) as error:
+            raise ReleaseError(
+                f"cannot read workspace member manifest {manifest_path}: {error}"
+            ) from error
+        if not isinstance(package, dict):
+            raise ReleaseError(f"workspace member has no package table: {manifest_path}")
+        name = package.get("name")
+        if not isinstance(name, str) or not name:
+            raise ReleaseError(f"workspace member has no package name: {manifest_path}")
+        if package.get("version") != {"workspace": True}:
+            continue
+        if name in names:
+            raise ReleaseError(f"duplicate workspace package name: {name}")
+        names.add(name)
+    if not names:
+        raise ReleaseError("Cargo workspace has no version-inheriting packages")
+    return version, names
+
+
+def normalize_release_cargo_lock(source_dir: Path, expected_version: str) -> dict[str, Any]:
+    cargo_root = source_dir / "codex-rs"
+    lock_path = cargo_root / "Cargo.lock"
+    workspace_version, workspace_names = _workspace_versioned_packages(cargo_root)
+    if workspace_version != expected_version:
+        raise ReleaseError(
+            f"Cargo workspace version {workspace_version} does not match "
+            f"resolved upstream {expected_version}"
+        )
+    try:
+        original = lock_path.read_text(encoding="utf-8")
+        lock = tomllib.loads(original)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ReleaseError(f"cannot read Cargo lockfile: {error}") from error
+    packages = lock.get("package")
+    if not isinstance(packages, list):
+        raise ReleaseError("Cargo lockfile has no package list")
+
+    locked: dict[str, dict[str, Any]] = {}
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ReleaseError("Cargo lockfile package entry is invalid")
+        name = package.get("name")
+        if name not in workspace_names or "source" in package:
+            continue
+        if name in locked:
+            raise ReleaseError(f"duplicate source-less workspace lock entry: {name}")
+        locked[name] = package
+    missing = workspace_names - set(locked)
+    if missing:
+        raise ReleaseError(
+            f"workspace packages missing source-less lock entries: {sorted(missing)}"
+        )
+    unexpected_zero = sorted(
+        str(package.get("name"))
+        for package in packages
+        if package.get("version") == "0.0.0"
+        and (package.get("name") not in workspace_names or "source" in package)
+    )
+    if unexpected_zero:
+        raise ReleaseError(
+            f"unexpected non-workspace 0.0.0 lock entries: {unexpected_zero}"
+        )
+
+    stale = sorted(
+        name for name, package in locked.items() if package.get("version") == "0.0.0"
+    )
+    invalid = sorted(
+        (name, str(package.get("version")))
+        for name, package in locked.items()
+        if package.get("version") not in {"0.0.0", workspace_version}
+    )
+    if invalid:
+        raise ReleaseError(f"unexpected workspace lock versions: {invalid}")
+
+    updated = original
+    if stale:
+        chunks = re.split(r"(?=^\[\[package\]\]\n)", original, flags=re.MULTILINE)
+        changed: set[str] = set()
+        for index, chunk in enumerate(chunks):
+            match = re.search(r'^name = "([^"]+)"$', chunk, flags=re.MULTILINE)
+            if match is None or match.group(1) not in stale:
+                continue
+            replaced, count = re.subn(
+                r'^version = "0\.0\.0"$',
+                f'version = "{workspace_version}"',
+                chunk,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if count != 1:
+                raise ReleaseError(
+                    f"cannot update workspace lock entry: {match.group(1)}"
+                )
+            chunks[index] = replaced
+            changed.add(match.group(1))
+        if changed != set(stale):
+            raise ReleaseError(
+                f"Cargo lock normalization missed entries: {sorted(set(stale) - changed)}"
+            )
+        updated = "".join(chunks)
+        temporary = lock_path.with_name(f".{lock_path.name}.tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        temporary.replace(lock_path)
+
+    reparsed = tomllib.loads(updated)
+    normalized_versions = {
+        package.get("name"): package.get("version")
+        for package in reparsed.get("package", [])
+        if isinstance(package, dict)
+        and package.get("name") in workspace_names
+        and "source" not in package
+    }
+    if set(normalized_versions) != workspace_names or set(
+        normalized_versions.values()
+    ) != {workspace_version}:
+        raise ReleaseError("Cargo lock normalization did not produce the expected graph")
+    return {
+        "revision": SOURCE_NORMALIZATION_REVISION,
+        "workspace_version": workspace_version,
+        "workspace_package_count": len(workspace_names),
+        "changed_package_count": len(stale),
+        "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
+        "after_sha256": hashlib.sha256(updated.encode()).hexdigest(),
+    }
+
+
 def prepare_source(
     manifest: Manifest,
     source_dir: Path,
@@ -292,6 +555,8 @@ def prepare_source(
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "preparing",
+        "policy_sha256": manifest.policy_sha256,
+        "release_lock_sha256": manifest.release_lock_sha256,
         "upstream": dataclasses.asdict(manifest.upstream),
         "patch_series_sha256": patch_series_digest(manifest.patches_dir),
         "patches": [path.name for path in patch_files(manifest.patches_dir)],
@@ -346,6 +611,41 @@ def prepare_source(
                 ],
                 cwd=source_dir,
             )
+        current_patch = "release Cargo.lock normalization"
+        normalization = normalize_release_cargo_lock(
+            source_dir, manifest.upstream.version
+        )
+        if normalization["changed_package_count"]:
+            source_date = git_output(
+                source_dir, "show", "-s", "--format=%aI", commit
+            )
+            commit_env = {
+                **os.environ,
+                "GIT_AUTHOR_DATE": source_date,
+                "GIT_COMMITTER_DATE": source_date,
+            }
+            run(
+                ["git", "add", "codex-rs/Cargo.lock"],
+                cwd=source_dir,
+                env=commit_env,
+            )
+            run(
+                [
+                    "git",
+                    "commit",
+                    "--no-gpg-sign",
+                    "-m",
+                    "fix: synchronize release Cargo lockfile",
+                ],
+                cwd=source_dir,
+                env=commit_env,
+            )
+            normalization["commit_sha"] = git_output(
+                source_dir, "rev-parse", "HEAD"
+            )
+        else:
+            normalization["commit_sha"] = None
+        current_patch = None
         run(["git", "diff", "--check", f"{commit}..HEAD"], cwd=source_dir)
         downstream_commit = git_output(source_dir, "rev-parse", "HEAD")
         report.update(
@@ -354,6 +654,7 @@ def prepare_source(
                 "upstream_tag_object_sha": tag_object,
                 "upstream_commit_sha": commit,
                 "downstream_commit_sha": downstream_commit,
+                "normalization": normalization,
             }
         )
         write_json(report_path, report)
@@ -410,7 +711,7 @@ def github_repository_file(
 
 
 def resolve_upstream_toolchain(
-    upstream: Upstream, current: Toolchain, *, token: str | None = None
+    upstream: Upstream, zig: str, *, token: str | None = None
 ) -> Toolchain:
     try:
         rust_toolchain = tomllib.loads(
@@ -447,7 +748,7 @@ def resolve_upstream_toolchain(
         raise ReleaseError(f"expected one upstream v8 crate version, got {v8_versions}")
     if VERSION_RE.fullmatch(v8_versions[0]) is None:
         raise ReleaseError(f"upstream v8 crate version is invalid: {v8_versions[0]}")
-    return Toolchain(rust=rust, zig=current.zig, rusty_v8=v8_versions[0])
+    return Toolchain(rust=rust, zig=zig, rusty_v8=v8_versions[0])
 
 
 def resolve_latest_stable(
@@ -497,56 +798,33 @@ def resolve_latest_stable(
     )
 
 
-def replace_manifest_values(
-    path: Path, updates: Mapping[tuple[str, str], str | int]
-) -> None:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    section = ""
-    seen: set[tuple[str, str]] = set()
-    result: list[str] = []
-    for line in lines:
-        section_match = re.fullmatch(r"\[([^]]+)\]", line.strip())
-        if section_match:
-            section = section_match.group(1)
-            result.append(line)
-            continue
-        key_match = re.match(r"^([A-Za-z0-9_]+)\s*=", line)
-        if key_match and (section, key_match.group(1)) in updates:
-            key = (section, key_match.group(1))
-            value = updates[key]
-            rendered = str(value) if isinstance(value, int) else json.dumps(value)
-            result.append(f"{key[1]} = {rendered}")
-            seen.add(key)
-        else:
-            result.append(line)
-    missing = set(updates) - seen
-    if missing:
-        raise ReleaseError(f"manifest keys not found: {sorted(missing)}")
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text("\n".join(result) + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
-def update_to_latest_stable(
-    manifest: Manifest, *, token: str | None = None
-) -> tuple[bool, Upstream, Toolchain]:
-    latest = resolve_latest_stable(manifest.upstream.repository, token=token)
-    toolchain = resolve_upstream_toolchain(latest, manifest.toolchain, token=token)
-    if latest == manifest.upstream and toolchain == manifest.toolchain:
-        return False, latest, toolchain
-    replace_manifest_values(
-        manifest.path,
-        {
-            ("distribution", "revision"): 1,
-            ("upstream", "version"): latest.version,
-            ("upstream", "tag"): latest.tag,
-            ("upstream", "tag_object_sha"): latest.tag_object_sha,
-            ("upstream", "commit_sha"): latest.commit_sha,
-            ("toolchain", "rust"): toolchain.rust,
-            ("toolchain", "rusty_v8"): toolchain.rusty_v8,
-        },
+def resolve_latest_manifest(
+    policy_document: PolicyDocument, *, token: str | None = None
+) -> Manifest:
+    latest = resolve_latest_stable(
+        policy_document.upstream_repository, token=token
     )
-    return True, latest, toolchain
+    toolchain = resolve_upstream_toolchain(
+        latest, policy_document.zig, token=token
+    )
+    manifest = Manifest(
+        policy_document=policy_document,
+        upstream=latest,
+        toolchain=toolchain,
+    )
+    manifest.validate()
+    return manifest
+
+
+def verify_latest_manifest(
+    manifest: Manifest, *, token: str | None = None
+) -> None:
+    latest = resolve_latest_manifest(manifest.policy_document, token=token)
+    if latest.release_lock() != manifest.release_lock():
+        raise ReleaseError(
+            f"release lock is no longer latest stable: locked {manifest.upstream.tag}, "
+            f"latest {latest.upstream.tag}"
+        )
 
 
 def sha256_file(path: Path) -> str:
@@ -811,6 +1089,7 @@ def required_payload_names(manifest: Manifest) -> tuple[str, ...]:
         f"src_binding_{profile}_{target}.rs",
         f"rusty_v8_{profile}_{target}.sha256",
         "build-info.json",
+        "release-lock.json",
         "sbom.spdx.json",
         "install.sh",
         "LICENSE",
@@ -836,6 +1115,14 @@ def finalize_candidate(
         raise ReleaseError("source-info does not describe a ready source tree")
     if source_info.get("upstream_commit_sha") != manifest.upstream.commit_sha:
         raise ReleaseError("source-info upstream SHA does not match manifest")
+    if source_info.get("policy_sha256") != manifest.policy_sha256:
+        raise ReleaseError("source-info policy digest does not match manifest")
+    if source_info.get("release_lock_sha256") != manifest.release_lock_sha256:
+        raise ReleaseError("source-info release lock digest does not match manifest")
+
+    release_lock_path = candidate_dir / "release-lock.json"
+    if read_json_object(release_lock_path) != manifest.release_lock():
+        raise ReleaseError("candidate release lock does not match manifest")
 
     expected_payload_names = set(required_payload_names(manifest))
     actual_payload_names = {path.name for path in candidate_dir.iterdir()}
@@ -866,6 +1153,8 @@ def finalize_candidate(
         "package_version": manifest.package_version,
         "upstream": dataclasses.asdict(manifest.upstream),
         "distribution": dataclasses.asdict(manifest.distribution),
+        "policy_sha256": manifest.policy_sha256,
+        "release_lock_sha256": manifest.release_lock_sha256,
         "assets": payload,
     }
     release_path = candidate_dir / "release.json"
@@ -891,6 +1180,8 @@ def finalize_candidate(
         "package_version": manifest.package_version,
         "upstream": dataclasses.asdict(manifest.upstream),
         "distribution": dataclasses.asdict(manifest.distribution),
+        "policy_sha256": manifest.policy_sha256,
+        "release_lock_sha256": manifest.release_lock_sha256,
         "patch_series_sha256": patch_series_digest(manifest.patches_dir),
         "source": source_info,
         "assets": assets,
@@ -923,6 +1214,12 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("candidate upstream identity does not match manifest")
     if candidate.get("distribution") != dataclasses.asdict(manifest.distribution):
         raise ReleaseError("candidate distribution does not match manifest")
+    if candidate.get("policy_sha256") != manifest.policy_sha256:
+        raise ReleaseError("candidate policy digest does not match manifest")
+    if candidate.get("release_lock_sha256") != manifest.release_lock_sha256:
+        raise ReleaseError("candidate release lock digest does not match manifest")
+    if read_json_object(candidate_dir / "release-lock.json") != manifest.release_lock():
+        raise ReleaseError("candidate release lock does not match manifest")
     if not str(candidate.get("candidate_run_id", "")).isdigit():
         raise ReleaseError("candidate run ID is invalid")
     if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
@@ -932,6 +1229,10 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("candidate source reconstruction is not ready")
     if source.get("upstream_commit_sha") != manifest.upstream.commit_sha:
         raise ReleaseError("candidate source upstream SHA does not match manifest")
+    if source.get("policy_sha256") != manifest.policy_sha256:
+        raise ReleaseError("candidate source policy digest does not match manifest")
+    if source.get("release_lock_sha256") != manifest.release_lock_sha256:
+        raise ReleaseError("candidate source release lock digest does not match manifest")
     assets = candidate.get("assets")
     if not isinstance(assets, dict):
         raise ReleaseError("candidate has no asset map")
@@ -977,6 +1278,10 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("release.json upstream identity does not match manifest")
     if release.get("distribution") != dataclasses.asdict(manifest.distribution):
         raise ReleaseError("release.json distribution does not match manifest")
+    if release.get("policy_sha256") != manifest.policy_sha256:
+        raise ReleaseError("release.json policy digest does not match manifest")
+    if release.get("release_lock_sha256") != manifest.release_lock_sha256:
+        raise ReleaseError("release.json release lock digest does not match manifest")
     release_assets = release.get("assets")
     expected_payload = {
         name: assets[name] for name in required_payload_names(manifest)

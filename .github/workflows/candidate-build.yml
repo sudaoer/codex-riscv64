@@ -16,7 +16,8 @@ concurrency:
 jobs:
   build:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
@@ -64,6 +65,7 @@ jobs:
                   "schema_version",
                   "v8_run_id",
                   "source_sha",
+                  "release_lock_sha256",
                   "v8_release_tag",
                   "v8_input_sha256",
               }
@@ -74,6 +76,10 @@ jobs:
               if re.fullmatch(r"[0-9a-f]{40}", str(handoff["source_sha"])) is None:
                   raise SystemExit("invalid V8 handoff source SHA")
               if re.fullmatch(
+                  r"[0-9a-f]{64}", str(handoff["release_lock_sha256"])
+              ) is None:
+                  raise SystemExit("invalid release lock SHA")
+              if re.fullmatch(
                   r"[0-9a-f]{64}", str(handoff["v8_input_sha256"])
               ) is None:
                   raise SystemExit("invalid V8 handoff input SHA")
@@ -83,6 +89,9 @@ jobs:
               ) is None:
                   raise SystemExit("invalid V8 handoff release tag")
               output.write(f"sha={handoff['source_sha']}\n")
+              output.write(
+                  f"release_lock_sha256={handoff['release_lock_sha256']}\n"
+              )
               output.write(f"v8_release_tag={handoff['v8_release_tag']}\n")
               output.write(f"v8_input_sha256={handoff['v8_input_sha256']}\n")
           PY
@@ -98,19 +107,47 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve manual release lock
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/handoff"
+          python3 scripts/release.py resolve-latest \
+            --output "${RUNNER_TEMP}/handoff/release-lock.json"
+
       - name: Resolve pinned release policy
         id: policy
-        run: python3 scripts/release.py validate
+        run: |
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
+            validate
+
+      - name: Verify release lock handoff
+        env:
+          HANDOFF_LOCK_SHA256: ${{ steps.source.outputs.release_lock_sha256 }}
+          RESOLVED_LOCK_SHA256: ${{ steps.policy.outputs.release_lock_sha256 }}
+        run: |
+          if [[ -n "$HANDOFF_LOCK_SHA256" && \
+                "$HANDOFF_LOCK_SHA256" != "$RESOLVED_LOCK_SHA256" ]]; then
+            echo "V8 handoff release lock digest does not match release lock" >&2
+            exit 1
+          fi
 
       - name: Reconstruct exact patched source
         run: |
-          python3 scripts/release.py prepare \
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
+            prepare \
             --source-dir "${RUNNER_TEMP}/source" \
             --report "${RUNNER_TEMP}/source-info.json"
 
       - name: Resolve immutable V8 identity
         id: v8
-        run: python3 scripts/release.py v8-key --source-dir "${RUNNER_TEMP}/source"
+        run: |
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
+            v8-key --source-dir "${RUNNER_TEMP}/source"
 
       - name: Download and verify immutable V8 release
         env:
@@ -132,7 +169,9 @@ jobs:
           gh release download "$V8_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "${RUNNER_TEMP}/v8"
-          python3 scripts/release.py validate-v8 \
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
+            validate-v8 \
             --source-dir "${RUNNER_TEMP}/source" \
             --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
           builder_sha="$(python3 -c \
@@ -146,10 +185,13 @@ jobs:
               --source-digest "$builder_sha" >/dev/null
           done
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: ${{ steps.policy.outputs.target }}
+      - name: Set up exact upstream Rust
+        env:
+          RUST_VERSION: ${{ steps.policy.outputs.rust }}
+          TARGET: ${{ steps.policy.outputs.target }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$TARGET"
+          rustup default "$RUST_VERSION"
 
       - name: Use a hermetic Cargo home
         run: |
@@ -192,6 +234,7 @@ jobs:
             --source-dir "${RUNNER_TEMP}/source" \
             --v8-dir "${RUNNER_TEMP}/v8" \
             --source-info "${RUNNER_TEMP}/source-info.json" \
+            --release-lock "${RUNNER_TEMP}/handoff/release-lock.json" \
             --candidate-dir "${GITHUB_WORKSPACE}/candidate"
 
       - name: Generate build provenance attestation

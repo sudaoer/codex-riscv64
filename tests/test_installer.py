@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install.sh"
 TARGET = "riscv64gc-unknown-linux-musl"
-RELEASE_TAG = "riscv-v0.147.0-r1"
+RELEASE_TAG = "riscv-v1.2.3-r1"
 
 
 class InstallerTests(unittest.TestCase):

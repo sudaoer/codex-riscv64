@@ -5,11 +5,6 @@ on:
     workflows: ["Compatibility check"]
     types: [completed]
   workflow_dispatch:
-    inputs:
-      bootstrap_candidate_run_id:
-        description: "Successful legacy Candidate run used only to seed a missing V8 release"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -24,7 +19,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
+       contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -48,6 +43,15 @@ jobs:
             echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Download immutable release lock
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-riscv64-release-lock
+          path: ${{ runner.temp }}/release
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
       - name: Check out exact downstream inputs
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -59,31 +63,36 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve manual release lock
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/release"
+          python3 scripts/release.py resolve-latest \
+            --output "${RUNNER_TEMP}/release/release-lock.json"
+
       - name: Resolve pinned release policy
-        run: python3 scripts/release.py validate
+        id: policy
+        run: |
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release/release-lock.json" \
+            validate
 
       - name: Reconstruct exact patched source
         run: |
-          python3 scripts/release.py prepare \
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release/release-lock.json" \
+            prepare \
             --source-dir "${RUNNER_TEMP}/source" \
             --report "${RUNNER_TEMP}/source-info.json"
 
       - name: Resolve immutable V8 identity
         id: v8
-        run: python3 scripts/release.py v8-key --source-dir "${RUNNER_TEMP}/source"
-
-      - name: Resolve optional bootstrap candidate
-        id: bootstrap
-        env:
-          DISPATCH_RUN_ID: ${{ inputs.bootstrap_candidate_run_id }}
-          REPOSITORY_RUN_ID: ${{ vars.V8_BOOTSTRAP_CANDIDATE_RUN_ID }}
         run: |
-          run_id="${DISPATCH_RUN_ID:-$REPOSITORY_RUN_ID}"
-          if [[ -n "$run_id" && ! "$run_id" =~ ^[0-9]+$ ]]; then
-            echo "Bootstrap candidate run ID must be numeric" >&2
-            exit 1
-          fi
-          echo "candidate_run_id=$run_id" >> "$GITHUB_OUTPUT"
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release/release-lock.json" \
+            v8-key --source-dir "${RUNNER_TEMP}/source"
 
       - name: Resolve immutable V8 release
         id: cache
@@ -104,7 +113,9 @@ jobs:
             gh release download "$V8_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --dir "${RUNNER_TEMP}/v8"
-            python3 scripts/release.py validate-v8 \
+            python3 scripts/release.py \
+              --release-lock "${RUNNER_TEMP}/release/release-lock.json" \
+              validate-v8 \
               --source-dir "${RUNNER_TEMP}/source" \
               --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
             echo "hit=true" >> "$GITHUB_OUTPUT"
@@ -112,52 +123,8 @@ jobs:
             echo "hit=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Bootstrap from successful legacy candidate
-        if: >-
-          steps.cache.outputs.hit == 'false' &&
-          steps.bootstrap.outputs.candidate_run_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_RUN_ID: ${{ steps.bootstrap.outputs.candidate_run_id }}
-          V8_ARCHIVE: ${{ steps.v8.outputs.v8_archive }}
-          V8_BINDING: ${{ steps.v8.outputs.v8_binding }}
-          V8_CHECKSUMS: ${{ steps.v8.outputs.v8_checksums }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/bootstrap/candidate"
-          gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}" \
-            >"${RUNNER_TEMP}/bootstrap/run.json"
-          gh run download "$CANDIDATE_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name codex-riscv64-candidate \
-            --dir "${RUNNER_TEMP}/bootstrap/candidate"
-          python3 scripts/release.py validate-run \
-            --run-json "${RUNNER_TEMP}/bootstrap/run.json" \
-            --candidate-dir "${RUNNER_TEMP}/bootstrap/candidate" \
-            --run-id "$CANDIDATE_RUN_ID" >/dev/null
-          candidate_sha="$(python3 -c \
-            'import json,sys; print(json.load(open(sys.argv[1]))["candidate_head_sha"])' \
-            "${RUNNER_TEMP}/bootstrap/candidate/candidate.json")"
-          for name in "$V8_ARCHIVE" "$V8_BINDING" "$V8_CHECKSUMS"; do
-            gh attestation verify "${RUNNER_TEMP}/bootstrap/candidate/${name}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/candidate-build.yml" \
-              --source-ref refs/heads/main \
-              --source-digest "$candidate_sha" >/dev/null
-            cp "${RUNNER_TEMP}/bootstrap/candidate/${name}" "${RUNNER_TEMP}/v8/${name}"
-          done
-          python3 scripts/release.py finalize-v8 \
-            --source-dir "${RUNNER_TEMP}/source" \
-            --v8-dir "${RUNNER_TEMP}/v8" \
-            --run-id "$GITHUB_RUN_ID" \
-            --head-sha "$GITHUB_SHA" \
-            --source-kind bootstrap \
-            --bootstrap-candidate-run-id "$CANDIDATE_RUN_ID"
-
       - name: Set up Bazel
-        if: >-
-          steps.cache.outputs.hit == 'false' &&
-          steps.bootstrap.outputs.candidate_run_id == ''
+        if: steps.cache.outputs.hit == 'false'
         uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
           bazelisk-version: ${{ steps.v8.outputs.bazelisk }}
@@ -166,25 +133,26 @@ jobs:
           module-root: ${{ runner.temp }}/source
 
       - name: Install V8 build prerequisites
-        if: >-
-          steps.cache.outputs.hit == 'false' &&
-          steps.bootstrap.outputs.candidate_run_id == ''
+        if: steps.cache.outputs.hit == 'false'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils llvm pkg-config libcap-dev zstd
 
       - name: Build and seal V8
-        if: >-
-          steps.cache.outputs.hit == 'false' &&
-          steps.bootstrap.outputs.candidate_run_id == ''
+        if: steps.cache.outputs.hit == 'false'
+        env:
+          GITHUB_SHA: ${{ steps.source.outputs.sha }}
         run: |
           bash scripts/build_v8.sh \
             --source-dir "${RUNNER_TEMP}/source" \
-            --v8-dir "${RUNNER_TEMP}/v8"
+            --v8-dir "${RUNNER_TEMP}/v8" \
+            --release-lock "${RUNNER_TEMP}/release/release-lock.json"
 
       - name: Verify resolved V8 bytes
         run: |
-          python3 scripts/release.py validate-v8 \
+          python3 scripts/release.py \
+            --release-lock "${RUNNER_TEMP}/release/release-lock.json" \
+            validate-v8 \
             --source-dir "${RUNNER_TEMP}/source" \
             --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
 
@@ -230,6 +198,7 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           V8_TAG: ${{ steps.v8.outputs.v8_release_tag }}
           V8_INPUT_SHA256: ${{ steps.v8.outputs.v8_input_sha256 }}
+          RELEASE_LOCK_SHA256: ${{ steps.policy.outputs.release_lock_sha256 }}
         run: |
           mkdir -p handoff
           python3 - <<'PY'
@@ -241,11 +210,15 @@ jobs:
               "schema_version": 1,
               "v8_run_id": os.environ["GITHUB_RUN_ID"],
               "source_sha": os.environ["SOURCE_SHA"],
+              "release_lock_sha256": os.environ["RELEASE_LOCK_SHA256"],
               "v8_release_tag": os.environ["V8_TAG"],
               "v8_input_sha256": os.environ["V8_INPUT_SHA256"],
           }
           Path("handoff/v8-handoff.json").write_text(
               json.dumps(handoff, indent=2, sort_keys=True) + "\n"
+          )
+          Path("handoff/release-lock.json").write_bytes(
+              Path(os.environ["RUNNER_TEMP"], "release", "release-lock.json").read_bytes()
           )
           PY
 
@@ -253,7 +226,9 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: codex-riscv64-v8-handoff
-          path: handoff/v8-handoff.json
+          path: |
+            handoff/v8-handoff.json
+            handoff/release-lock.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
