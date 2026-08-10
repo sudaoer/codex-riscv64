@@ -39,10 +39,6 @@ Stable releases currently cover only:
 - the `riscv64gc-unknown-linux-musl` packages;
 - prebuilt versions distributed through GitHub Releases.
 
-本项目当前不对 GNU/glibc 目标、RVA23/RVV 构建或 RISC-V npm 包作稳定支持承诺。
-
-This project currently makes no stable-support promise for GNU/glibc targets,
-RVA23/RVV builds, or RISC-V npm packages.
 
 ## 快速安装 / Quick install
 
@@ -62,9 +58,7 @@ When a release is available on the [Releases](https://github.com/sudaoer/codex-r
 page, run:
 
 ```sh
-curl -fsSL \
-  https://github.com/sudaoer/codex-riscv64/releases/latest/download/install.sh \
-  | sh
+curl -fsSL https://github.com/sudaoer/codex-riscv64/releases/latest/download/install.sh | sh
 ```
 
 安装器默认会：
@@ -96,9 +90,7 @@ To install a specific version from the Releases page, replace `TAG` with the
 actual `riscv-vX.Y.Z-rN` tag:
 
 ```sh
-curl -fsSL \
-  https://github.com/sudaoer/codex-riscv64/releases/latest/download/install.sh \
-  | sh -s -- --version TAG
+curl -fsSL https://github.com/sudaoer/codex-riscv64/releases/latest/download/install.sh | sh -s -- --version TAG
 ```
 
 ## 首次运行 / First run
@@ -210,13 +202,3 @@ validation succeed.
 Report security issues privately according to the [security policy](./SECURITY.md)
 rather than disclosing possible release-integrity, installer, or sandbox issues in
 a public issue. See [LICENSE](./LICENSE) for the project license.
-
-## 开发与维护 / Development and maintenance
-
-本 README 只面向使用者。需要查看下游补丁或发布实现时，请阅读
-[patch series](./patches/) 和 [release workflows](./.github/workflows/)；维护过程中的
-构建结论记录在 [`analysis/`](./analysis/) 中。
-
-This README is user-focused. To inspect downstream patches or release
-implementation, see the [patch series](./patches/) and [release workflows](./.github/workflows/);
-build and release findings are recorded under [`analysis/`](./analysis/).

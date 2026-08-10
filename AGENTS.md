@@ -1,5 +1,4 @@
 - This repository builds unofficial Linux/riscv64 releases of OpenAI Codex.
 - Keep upstream source changes in the ordered patch series under `patches/`.
 - Do not add OpenAI-owned signing, R2, npm publishing, or private runner configuration.
-- Record build and release investigation results under `analysis/`.
-- Stable releases target `riscv64gc-unknown-linux-musl`; RVA23 remains experimental.
+- Stable releases target `riscv64gc-unknown-linux-musl`.

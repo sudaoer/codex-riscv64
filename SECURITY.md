@@ -12,7 +12,6 @@ pass.
 Release provenance can be checked with GitHub CLI:
 
 ```sh
-gh attestation verify codex-package-riscv64gc-unknown-linux-musl.tar.gz \
-  --repo sudaoer/codex-riscv64
+gh attestation verify codex-package-riscv64gc-unknown-linux-musl.tar.gz --repo sudaoer/codex-riscv64
 sha256sum -c SHA256SUMS
 ```
