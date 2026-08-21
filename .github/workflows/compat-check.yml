@@ -57,6 +57,8 @@ jobs:
             --report "${RUNNER_TEMP}/source-info.json"
 
       - name: Run focused upstream package and V8 tests
+        env:
+          CODEX_REPO_ROOT: ${{ runner.temp }}/source
         working-directory: ${{ runner.temp }}/source
         run: |
           python3 .github/scripts/test_rusty_v8_bazel.py

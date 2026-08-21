@@ -135,6 +135,26 @@ class ManifestTests(unittest.TestCase):
             r"      - '\*\*/\*\.md'\n      - 'analysis/\*\*'",
         )
 
+    def test_package_invocations_export_upstream_repo_root(self) -> None:
+        compat = (ROOT / ".github/workflows/compat-check.yml").read_text()
+        package_tests = compat[
+            compat.index("Run focused upstream package and V8 tests") :
+        ]
+        package_tests = package_tests[
+            : package_tests.index("Set up exact upstream Rust")
+        ]
+        self.assertIn(
+            "CODEX_REPO_ROOT: ${{ runner.temp }}/source",
+            package_tests,
+        )
+
+        candidate_script = (ROOT / "scripts/build_candidate.sh").read_text()
+        self.assertIn(
+            'source_dir="$(cd "$source_dir" && pwd)"\n'
+            'export CODEX_REPO_ROOT="$source_dir"',
+            candidate_script,
+        )
+
     def test_candidate_fast_path_precedes_expensive_steps(self) -> None:
         candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
         release_state = candidate.index("release-state")
