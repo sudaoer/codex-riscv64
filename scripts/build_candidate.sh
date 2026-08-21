@@ -62,6 +62,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$(cd "$source_dir" && pwd)"
+export CODEX_REPO_ROOT="$source_dir"
 v8_dir="$(cd "$v8_dir" && pwd)"
 source_info="$(cd "$(dirname "$source_info")" && pwd)/$(basename "$source_info")"
 release_lock="$(cd "$(dirname "$release_lock")" && pwd)/$(basename "$release_lock")"
