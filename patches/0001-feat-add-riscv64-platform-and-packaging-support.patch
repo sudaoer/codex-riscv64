@@ -8,7 +8,6 @@ Subject: [PATCH 1/4] feat: add riscv64 platform and packaging support
  README.md                                     |  1 +
  codex-cli/bin/codex.js                        |  4 ++
  codex-cli/scripts/build_npm_package.py        |  8 ++++
- .../exec-server/testing/run_version_skew.sh   |  1 +
  .../npm/bin/codex-responses-api-proxy.js      |  3 ++
  docs/riscv64-linux.md                         |  4 ++
  scripts/codex_package/targets.py              |  7 +++
@@ -19,7 +18,7 @@ Subject: [PATCH 1/4] feat: add riscv64 platform and packaging support
  sdk/python/_runtime_setup.py                  |  2 +
  .../test_artifact_workflow_and_binaries.py    |  5 ++
  sdk/typescript/src/exec.ts                    |  4 ++
- 15 files changed, 118 insertions(+), 1 deletion(-)
+ 14 files changed, 117 insertions(+), 1 deletion(-)
  create mode 100644 docs/riscv64-linux.md
  create mode 100644 scripts/codex_package/test_targets.py
 
@@ -103,18 +102,6 @@ index 60f6ca7a9d..302c70a8c3 100755
      "codex-darwin-x64": [CODEX_PACKAGE_COMPONENT],
      "codex-darwin-arm64": [CODEX_PACKAGE_COMPONENT],
      "codex-win32-x64": [CODEX_PACKAGE_COMPONENT],
-diff --git a/codex-rs/exec-server/testing/run_version_skew.sh b/codex-rs/exec-server/testing/run_version_skew.sh
-index f0e9536def..e94604b737 100755
---- a/codex-rs/exec-server/testing/run_version_skew.sh
-+++ b/codex-rs/exec-server/testing/run_version_skew.sh
-@@ -21,6 +21,7 @@ case "$(uname -s):$(uname -m)" in
-   Darwin:arm64) target="aarch64-apple-darwin" ;;
-   Darwin:x86_64) target="x86_64-apple-darwin" ;;
-   Linux:aarch64 | Linux:arm64) target="aarch64-unknown-linux-musl" ;;
-+  Linux:riscv64) target="riscv64gc-unknown-linux-musl" ;;
-   Linux:x86_64) target="x86_64-unknown-linux-musl" ;;
-   *)
-     echo "Unsupported platform: $(uname -s) $(uname -m)" >&2
 diff --git a/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js b/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js
 index e2c3ee7d3e..b3ddf5ae57 100755
 --- a/codex-rs/responses-api-proxy/npm/bin/codex-responses-api-proxy.js
