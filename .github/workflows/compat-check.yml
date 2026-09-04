@@ -8,6 +8,12 @@ on:
       - '**/*.md'
       - 'analysis/**'
   workflow_dispatch:
+    inputs:
+      continue_chain:
+        description: Internal flag used by the upstream watcher to continue the build chain
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -109,3 +115,25 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  continue-chain:
+    needs: check
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.continue_chain == true &&
+      github.actor == 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger V8 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run v8-build.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f compatibility_run_id="$GITHUB_RUN_ID" \
+            -f compatibility_source_sha="$GITHUB_SHA" \
+            -f continue_chain=true
