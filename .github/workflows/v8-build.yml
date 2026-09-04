@@ -5,12 +5,26 @@ on:
     workflows: ["Compatibility check"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      compatibility_run_id:
+        description: Successful Compatibility check run ID for an automated chain
+        required: false
+        type: string
+      compatibility_source_sha:
+        description: Exact source revision checked by the Compatibility check run
+        required: false
+        type: string
+      continue_chain:
+        description: Internal flag used by the upstream watcher to continue the build chain
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: v8-${{ github.event.workflow_run.head_sha || github.sha }}
+  group: v8-${{ inputs.compatibility_source_sha || github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +33,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.actor.login != 'github-actions[bot]' &&
        contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
@@ -34,22 +49,100 @@ jobs:
         id: source
         env:
           EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
           WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMPATIBILITY_RUN_ID: ${{ inputs.compatibility_run_id }}
+          COMPATIBILITY_SOURCE_SHA: ${{ inputs.compatibility_source_sha }}
           DISPATCH_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$EVENT_NAME" == workflow_run ]]; then
-            echo "sha=$WORKFLOW_RUN_SHA" >> "$GITHUB_OUTPUT"
-          else
-            echo "sha=$DISPATCH_SHA" >> "$GITHUB_OUTPUT"
-          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          from pathlib import Path
+
+          event_name = os.environ["EVENT_NAME"]
+          workflow_run_id = os.environ["WORKFLOW_RUN_ID"].strip()
+          workflow_run_sha = os.environ["WORKFLOW_RUN_SHA"].strip()
+          compatibility_run_id = os.environ["COMPATIBILITY_RUN_ID"].strip()
+          compatibility_source_sha = os.environ["COMPATIBILITY_SOURCE_SHA"].strip()
+
+          if event_name == "workflow_run":
+              source_sha = workflow_run_sha
+              release_run_id = workflow_run_id
+          elif compatibility_run_id or compatibility_source_sha:
+              if not compatibility_run_id or not compatibility_source_sha:
+                  raise SystemExit(
+                      "compatibility_run_id and compatibility_source_sha must be provided together"
+                  )
+              if not compatibility_run_id.isdecimal() or int(compatibility_run_id) <= 0:
+                  raise SystemExit("invalid Compatibility check run ID")
+              if re.fullmatch(r"[0-9a-f]{40}", compatibility_source_sha) is None:
+                  raise SystemExit("invalid Compatibility check source SHA")
+
+              deadline = time.monotonic() + 120
+              while True:
+                  response = subprocess.run(
+                      [
+                          "gh",
+                          "api",
+                          f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                          f"{compatibility_run_id}",
+                      ],
+                      check=True,
+                      stdout=subprocess.PIPE,
+                      text=True,
+                  )
+                  run = json.loads(response.stdout)
+                  expected = {
+                      "path": ".github/workflows/compat-check.yml",
+                      "event": "workflow_dispatch",
+                      "head_branch": "main",
+                      "head_sha": compatibility_source_sha,
+                  }
+                  for key, value in expected.items():
+                      if run.get(key) != value:
+                          raise SystemExit(
+                              f"Compatibility check run {key} mismatch: "
+                              f"expected {value!r}, got {run.get(key)!r}"
+                          )
+                  if (run.get("head_repository") or {}).get("full_name") != os.environ[
+                      "GITHUB_REPOSITORY"
+                  ]:
+                      raise SystemExit("Compatibility check repository mismatch")
+                  if (run.get("actor") or {}).get("login") != "github-actions[bot]":
+                      raise SystemExit("Compatibility check was not dispatched by the watcher")
+                  if run.get("status") == "completed":
+                      if run.get("conclusion") != "success":
+                          raise SystemExit("Compatibility check did not succeed")
+                      break
+                  if time.monotonic() >= deadline:
+                      raise SystemExit("timed out waiting for Compatibility check completion")
+                  time.sleep(2)
+
+              source_sha = compatibility_source_sha
+              release_run_id = compatibility_run_id
+          else:
+              source_sha = os.environ["DISPATCH_SHA"]
+              release_run_id = ""
+
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("invalid V8 source SHA")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"sha={source_sha}\n")
+              output.write(f"release_run_id={release_run_id}\n")
+          PY
 
       - name: Download immutable release lock
-        if: github.event_name == 'workflow_run'
+        if: steps.source.outputs.release_run_id != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: codex-riscv64-release-lock
           path: ${{ runner.temp }}/release
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.source.outputs.release_run_id }}
           github-token: ${{ github.token }}
 
       - name: Check out exact downstream inputs
@@ -64,7 +157,7 @@ jobs:
           python-version: "3.12"
 
       - name: Resolve manual release lock
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.source.outputs.release_run_id == ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -232,3 +325,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  continue-chain:
+    needs: build
+    if: >-
+      needs.build.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.continue_chain == true &&
+      github.actor == 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Trigger Candidate build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run candidate-build.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f v8_run_id="$GITHUB_RUN_ID"

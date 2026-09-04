@@ -209,7 +209,61 @@ class ManifestTests(unittest.TestCase):
         watcher = (ROOT / ".github/workflows/upstream-watch.yml").read_text()
         self.assertIn("release-state", watcher)
         self.assertIn("steps.state.outputs.hit == 'false'", watcher)
+        self.assertIn("gh workflow run compat-check.yml", watcher)
+        self.assertIn("-f continue_chain=true", watcher)
         self.assertNotIn("gh release view", watcher)
+
+    def test_bot_dispatched_workflows_continue_with_exact_handoffs(self) -> None:
+        compat = (ROOT / ".github/workflows/compat-check.yml").read_text()
+        v8 = (ROOT / ".github/workflows/v8-build.yml").read_text()
+        candidate = (ROOT / ".github/workflows/candidate-build.yml").read_text()
+
+        self.assertIn("continue_chain:\n", compat)
+        compat_handoff = compat[compat.index("  continue-chain:\n") :]
+        self.assertIn("needs: check", compat_handoff)
+        self.assertIn("inputs.continue_chain == true", compat_handoff)
+        self.assertIn("github.actor == 'github-actions[bot]'", compat_handoff)
+        self.assertIn("actions: write", compat_handoff)
+        self.assertIn("gh workflow run v8-build.yml", compat_handoff)
+        self.assertIn(
+            '-f compatibility_run_id="$GITHUB_RUN_ID"', compat_handoff
+        )
+        self.assertIn(
+            '-f compatibility_source_sha="$GITHUB_SHA"', compat_handoff
+        )
+        self.assertIn("-f continue_chain=true", compat_handoff)
+
+        self.assertIn("compatibility_run_id:\n", v8)
+        self.assertIn("compatibility_source_sha:\n", v8)
+        self.assertIn(
+            "github.event.workflow_run.actor.login != 'github-actions[bot]'",
+            v8,
+        )
+        self.assertIn("steps.source.outputs.release_run_id", v8)
+        self.assertIn('".github/workflows/compat-check.yml"', v8)
+        self.assertIn("Compatibility check did not succeed", v8)
+        v8_handoff = v8[v8.index("  continue-chain:\n") :]
+        self.assertIn("needs: build", v8_handoff)
+        self.assertIn("needs.build.result == 'success'", v8_handoff)
+        self.assertIn("inputs.continue_chain == true", v8_handoff)
+        self.assertIn("github.actor == 'github-actions[bot]'", v8_handoff)
+        self.assertIn("actions: write", v8_handoff)
+        self.assertIn("gh workflow run candidate-build.yml", v8_handoff)
+        self.assertIn('-f v8_run_id="$GITHUB_RUN_ID"', v8_handoff)
+
+        self.assertIn("v8_run_id:\n", candidate)
+        self.assertIn(
+            "github.event.workflow_run.actor.login != 'github-actions[bot]'",
+            candidate,
+        )
+        self.assertIn("Validate chained V8 run", candidate)
+        self.assertIn('".github/workflows/v8-build.yml"', candidate)
+        self.assertIn("V8 build did not succeed", candidate)
+        self.assertIn(
+            "run-id: ${{ github.event.workflow_run.id || inputs.v8_run_id }}",
+            candidate,
+        )
+        self.assertIn("HANDOFF_RUN_ID", candidate)
 
     def test_release_lock_round_trip_is_canonical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

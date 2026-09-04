@@ -52,4 +52,5 @@ jobs:
         run: |
           gh workflow run compat-check.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref main
+            --ref main \
+            -f continue_chain=true

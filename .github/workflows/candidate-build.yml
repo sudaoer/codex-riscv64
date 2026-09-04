@@ -11,12 +11,16 @@ on:
         required: false
         default: false
         type: boolean
+      v8_run_id:
+        description: Successful V8 build run ID for an automated chain
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: candidate-${{ github.event.workflow_run.id || github.sha }}
+  group: candidate-${{ inputs.v8_run_id || github.event.workflow_run.id || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -25,6 +29,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.actor.login != 'github-actions[bot]' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -35,20 +40,76 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      - name: Validate chained V8 run
+        if: github.event_name == 'workflow_dispatch' && inputs.v8_run_id != ''
+        env:
+          V8_RUN_ID: ${{ inputs.v8_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import time
+
+          run_id = os.environ["V8_RUN_ID"].strip()
+          if not run_id.isdecimal() or int(run_id) <= 0:
+              raise SystemExit("invalid V8 build run ID")
+
+          deadline = time.monotonic() + 120
+          while True:
+              response = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}",
+                  ],
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  text=True,
+              )
+              run = json.loads(response.stdout)
+              expected = {
+                  "path": ".github/workflows/v8-build.yml",
+                  "event": "workflow_dispatch",
+                  "head_branch": "main",
+              }
+              for key, value in expected.items():
+                  if run.get(key) != value:
+                      raise SystemExit(
+                          f"V8 build run {key} mismatch: "
+                          f"expected {value!r}, got {run.get(key)!r}"
+                      )
+              if (run.get("head_repository") or {}).get("full_name") != os.environ[
+                  "GITHUB_REPOSITORY"
+              ]:
+                  raise SystemExit("V8 build repository mismatch")
+              if (run.get("actor") or {}).get("login") != "github-actions[bot]":
+                  raise SystemExit("V8 build was not dispatched by the automated chain")
+              if run.get("status") == "completed":
+                  if run.get("conclusion") != "success":
+                      raise SystemExit("V8 build did not succeed")
+                  break
+              if time.monotonic() >= deadline:
+                  raise SystemExit("timed out waiting for V8 build completion")
+              time.sleep(2)
+          PY
+
       - name: Download V8 handoff
-        if: github.event_name == 'workflow_run'
+        if: >-
+          github.event_name == 'workflow_run' ||
+          (github.event_name == 'workflow_dispatch' && inputs.v8_run_id != '')
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: codex-riscv64-v8-handoff
           path: ${{ runner.temp }}/handoff
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event.workflow_run.id || inputs.v8_run_id }}
           github-token: ${{ github.token }}
 
       - name: Resolve candidate source revision
         id: source
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          HANDOFF_RUN_ID: ${{ github.event.workflow_run.id || inputs.v8_run_id }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
           python3 - <<'PY'
@@ -57,8 +118,9 @@ jobs:
           import re
           from pathlib import Path
 
+          handoff_run_id = os.environ["HANDOFF_RUN_ID"].strip()
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
-              if os.environ["EVENT_NAME"] != "workflow_run":
+              if not handoff_run_id:
                   output.write(f"sha={os.environ['DISPATCH_SHA']}\n")
                   raise SystemExit(0)
 
@@ -77,7 +139,7 @@ jobs:
               }
               if set(handoff) != expected_keys or handoff["schema_version"] != 1:
                   raise SystemExit("invalid V8 handoff schema")
-              if str(handoff["v8_run_id"]) != os.environ["WORKFLOW_RUN_ID"]:
+              if str(handoff["v8_run_id"]) != handoff_run_id:
                   raise SystemExit("V8 handoff run ID mismatch")
               if re.fullmatch(r"[0-9a-f]{40}", str(handoff["source_sha"])) is None:
                   raise SystemExit("invalid V8 handoff source SHA")
@@ -114,7 +176,7 @@ jobs:
           python-version: "3.12"
 
       - name: Resolve manual release lock
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.v8_run_id == ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
