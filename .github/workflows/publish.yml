@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       k3_report_b64:
-        description: Base64-encoded K3 validation report
+        description: Base64-encoded validation report (stored as k3-report.json)
         required: true
         type: string
 
@@ -29,6 +29,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.preflight.outputs.release_tag }}
       candidate_head_sha: ${{ steps.preflight.outputs.candidate_head_sha }}
+      validation_target: ${{ steps.preflight.outputs.validation_target }}
     steps:
       - name: Check out release policy from main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +76,7 @@ jobs:
             --candidate-dir candidate \
             --run-id "$RUN_ID" >/dev/null
 
-      - name: Verify candidate bytes and K3 report
+      - name: Verify candidate bytes and validation report
         id: preflight
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -150,12 +151,20 @@ jobs:
             echo "Release already exists and will not be overwritten: $RELEASE_TAG" >&2
             exit 1
           fi
+          VALIDATION_TARGET=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("promotion/k3-report.json").read_text())
+          print(report.get("validation_target", "native-k3"))
+          PY
+          )
           cat > release-notes.md <<EOF
           Unofficial Codex build for Linux/riscv64.
 
           This release promotes the exact candidate bytes from Actions run
           ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.candidate_run_id }}
-          after native K3 validation and protected-environment approval.
+          after ${VALIDATION_TARGET} validation and protected-environment approval.
           EOF
           gh release create "$RELEASE_TAG" \
             promotion/candidate/* \

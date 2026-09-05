@@ -5,3 +5,6 @@ __pycache__/
 .work/
 dist/
 k3-report-*.json
+qemu-report-*.json
+k3-report-*-logs/
+qemu-report-*-logs/

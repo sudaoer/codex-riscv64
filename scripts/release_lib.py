@@ -50,7 +50,7 @@ V8_INPUT_DIRECTORIES = (
     "third_party/v8",
 )
 SOURCE_NORMALIZATION_REVISION = 1
-REQUIRED_K3_TESTS = (
+REQUIRED_VALIDATION_TESTS = (
     "installer",
     "codex-version",
     "codex-help",
@@ -61,6 +61,8 @@ REQUIRED_K3_TESTS = (
     "responses-proxy-help",
     "code-mode-stdio",
 )
+# Compatibility name for callers and reports produced before QEMU support.
+REQUIRED_K3_TESTS = REQUIRED_VALIDATION_TESTS
 
 
 class ReleaseError(RuntimeError):
@@ -1599,7 +1601,7 @@ def parse_timestamp(value: Any, *, field: str) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def validate_k3_report(
+def validate_validation_report(
     manifest: Manifest,
     candidate: Mapping[str, Any],
     report: Mapping[str, Any],
@@ -1607,31 +1609,75 @@ def validate_k3_report(
     now: dt.datetime | None = None,
 ) -> None:
     if report.get("schema_version") != SCHEMA_VERSION:
-        raise ReleaseError("K3 report schema is unsupported")
+        raise ReleaseError("validation report schema is unsupported")
     if str(report.get("candidate_run_id")) != str(candidate["candidate_run_id"]):
-        raise ReleaseError("K3 report run ID does not match candidate")
+        raise ReleaseError("validation report run ID does not match candidate")
     if report.get("candidate_head_sha") != candidate["candidate_head_sha"]:
-        raise ReleaseError("K3 report head SHA does not match candidate")
+        raise ReleaseError("validation report head SHA does not match candidate")
     if report.get("release_tag") != manifest.release_tag:
-        raise ReleaseError("K3 report release tag does not match manifest")
+        raise ReleaseError("validation report release tag does not match manifest")
+
+    has_validation_target = "validation_target" in report
+    validation_target = report.get("validation_target")
+    if not has_validation_target:
+        # Reports produced by the original K3 validator predate the target
+        # field and are accepted as native K3 evidence.
+        validation_target = "native-k3"
+    elif validation_target not in ("native-k3", "qemu-system-riscv64"):
+        raise ReleaseError("validation report has an unknown validation target")
+
+    if has_validation_target:
+        host = report.get("host")
+        if not isinstance(host, Mapping):
+            raise ReleaseError("validation report host metadata is required")
+        if host.get("system") != "Linux":
+            raise ReleaseError("validation report host system must be Linux")
+        if host.get("machine") != "riscv64":
+            raise ReleaseError("validation report host machine must be riscv64")
+
+        if validation_target == "qemu-system-riscv64":
+            uid = host.get("uid")
+            if isinstance(uid, bool) or not isinstance(uid, int) or uid <= 0:
+                raise ReleaseError("QEMU validation report host.uid must be positive")
+            qemu = report.get("qemu")
+            if not isinstance(qemu, Mapping):
+                raise ReleaseError("QEMU validation report qemu metadata is required")
+            if qemu.get("accelerator") != "tcg":
+                raise ReleaseError("QEMU validation report accelerator must be tcg")
+            if qemu.get("machine") != "virt":
+                raise ReleaseError("QEMU validation report machine must be virt")
+            if not isinstance(qemu.get("version"), str) or not qemu["version"].strip():
+                raise ReleaseError("QEMU validation report version is required")
+            image_url = qemu.get("image_url")
+            parsed_url = urllib.parse.urlparse(image_url) if isinstance(image_url, str) else None
+            if parsed_url is None or parsed_url.scheme != "https" or not parsed_url.netloc:
+                raise ReleaseError("QEMU validation report image_url must be HTTPS")
+            image_sha256 = qemu.get("image_sha256")
+            if not isinstance(image_sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", image_sha256) is None:
+                raise ReleaseError("QEMU validation report image_sha256 must be 64 hex characters")
+
     if report.get("overall") != "pass":
-        raise ReleaseError("K3 report did not pass")
+        raise ReleaseError("validation report did not pass")
     tests = report.get("tests")
     if not isinstance(tests, dict):
-        raise ReleaseError("K3 report has no test map")
-    missing = [name for name in REQUIRED_K3_TESTS if tests.get(name) != "pass"]
+        raise ReleaseError("validation report has no test map")
+    missing = [name for name in REQUIRED_VALIDATION_TESTS if tests.get(name) != "pass"]
     if missing:
-        raise ReleaseError(f"K3 required tests did not pass: {missing}")
+        raise ReleaseError(f"validation required tests did not pass: {missing}")
     report_assets = report.get("assets")
     if report_assets != candidate.get("assets"):
-        raise ReleaseError("K3 report was not generated from every candidate asset")
+        raise ReleaseError("validation report was not generated from every candidate asset")
     finished_at = parse_timestamp(report.get("finished_at"), field="finished_at")
     current = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
     if finished_at > current + dt.timedelta(minutes=5):
-        raise ReleaseError("K3 report is dated in the future")
+        raise ReleaseError("validation report is dated in the future")
     max_age = dt.timedelta(days=manifest.distribution.k3_report_max_age_days)
     if current - finished_at > max_age:
-        raise ReleaseError("K3 report is too old to publish")
+        raise ReleaseError("validation report is too old to publish")
+
+
+# Compatibility name for callers using the original K3-only API.
+validate_k3_report = validate_validation_report
 
 
 def preflight_publish(
@@ -1646,7 +1692,7 @@ def preflight_publish(
     if str(candidate.get("candidate_run_id")) != expected_run_id:
         raise ReleaseError("requested run ID does not match candidate metadata")
     report = read_json_object(k3_report_path)
-    validate_k3_report(manifest, candidate, report, now=now)
+    validate_validation_report(manifest, candidate, report, now=now)
     return candidate, report
 
 

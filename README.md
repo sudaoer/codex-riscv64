@@ -146,12 +146,118 @@ The Release page also provides separate app-server and Responses API proxy packa
 They are for their respective advanced use cases and are not required for a normal
 CLI installation; download the asset matching your target from the Release page.
 
-已发布的稳定包会在 RISC-V Linux 主机上进行原生验证，包括 CLI、sandbox、Code Mode
-通信、内置 `bwrap` 和 PCRE2 ripgrep 的基本检查。
+## 维护者验证 / Maintainer validation
 
-Published stable packages are natively checked on a RISC-V Linux host, including
-basic checks of the CLI, sandbox, Code Mode communication, bundled `bwrap`, and
-PCRE2 ripgrep.
+维护者可以用统一验证入口在 K3 主机或 QEMU riscv64 客体中检查 Candidate。默认目标仍是
+K3；旧入口 `scripts/k3_validate.py` 保留兼容性：
+
+```sh
+python3 scripts/validate.py --target k3 --run-id RUN_ID
+python3 scripts/k3_validate.py --run-id RUN_ID
+python3 scripts/validate.py --target qemu --run-id RUN_ID
+```
+
+`--run-id` 是必需的 Candidate run ID；`--target` 可选且默认为 `k3`，`--policy` 默认为
+`release/policy.toml`，`--output` 可指定报告路径。`--skip-attestation` 仅跳过本地验证中的
+attestation 检查，`--request-publish` 请求发布工作流；两者都不会改变受保护发布审批。
+
+QEMU 验证要求 Linux 主机上的以下工具和包：
+
+```sh
+sudo apt-get update
+sudo apt-get install gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+  cloud-image-utils genisoimage openssh-client
+```
+
+QEMU 默认使用 4 个 vCPU、4096 MiB 内存、900 秒启动超时和 10 倍测试超时倍率；原生 K3
+默认倍率为 1。总验证时间上限为两小时。镜像固定为 Ubuntu Noble `release-20260826`：
+`https://cloud-images.ubuntu.com/releases/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-riscv64.img`，
+SHA-256 为
+`6d0e58dc153585213020b0ec51112ebd70bedd5d2bc563599207f819586e141f`。
+下载只会在校验通过后进入 `--qemu-cache-dir`（默认 `.work/qemu`）；已缓存镜像每次都会
+重新校验，损坏缓存会重新下载。每轮验证都会创建 qcow2 overlay、UEFI 变量盘和 NoCloud
+配置盘，结束或中断时清理临时客体资源。
+
+检查以客体普通用户运行。初始化仅在临时客体内将
+`kernel.apparmor_restrict_unprivileged_userns` 设为 `0`，让随包 bwrap 使用 user namespace，
+并从宿主 UTC 初始化客体时钟；报告记录实际配置与时钟偏差。
+
+可通过 `--qemu-cache-dir`、`--qemu-efi-dir`（默认 `/usr/share/qemu-efi-riscv64`）、
+`--qemu-cpus`、`--qemu-memory-mib`、`--qemu-boot-timeout` 和 `--timeout-scale` 调整
+QEMU 参数；`--ssh-host`（默认 `k3`）用于旧的原生入口。未指定 `--output` 时，成功报告
+写入 `analysis/k3-report-riscv-vX.Y.Z-rN.json` 或
+`analysis/qemu-report-riscv-vX.Y.Z-rN.json`，对应日志目录去掉 `.json` 后追加 `-logs`；失败
+时会保留报告和日志，方便定位启动、SSH 或检查失败。
+
+验证报告的正式发布资产名称仍为 `k3-report.json`；发布预检同时接受旧的 `--k3-report` 和
+`--report` 参数，工作流输入仍为 `k3_report_b64`。
+历史报告如果没有 `validation_target` 会按 `native-k3` 兼容处理；新报告会明确写入
+`native-k3` 或 `qemu-system-riscv64`，发布说明也会显示实际目标。`--request-publish` 只
+请求 Publish workflow，正式发布仍须通过受保护环境的人工审批。
+
+Maintainers can use the single validation entry point against the K3 host or a QEMU
+riscv64 guest. K3 remains the default, and the legacy `scripts/k3_validate.py` entry
+point is kept for compatibility:
+
+```sh
+python3 scripts/validate.py --target k3 --run-id RUN_ID
+python3 scripts/k3_validate.py --run-id RUN_ID
+python3 scripts/validate.py --target qemu --run-id RUN_ID
+```
+
+`--run-id` is the required Candidate run ID. `--target` is optional and defaults to
+`k3`; `--policy` defaults to `release/policy.toml`; and `--output` selects the report
+path. `--skip-attestation` skips only the local attestation check, while
+`--request-publish` requests the publication workflow; neither bypasses protected
+publication approval.
+
+QEMU validation requires these host packages on Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+  cloud-image-utils genisoimage openssh-client
+```
+
+The QEMU defaults are 4 vCPUs, 4096 MiB of memory, a 900-second boot timeout, and a
+10x test timeout scale; native K3 uses a default scale of 1. The overall limit is two
+hours. The guest image is pinned to
+Ubuntu Noble `release-20260826` at
+`https://cloud-images.ubuntu.com/releases/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-riscv64.img`
+with SHA-256
+`6d0e58dc153585213020b0ec51112ebd70bedd5d2bc563599207f819586e141f`.
+Only verified downloads enter `--qemu-cache-dir` (default `.work/qemu`); cached bytes
+are rechecked on every run and a corrupt cache is downloaded again. Each run creates a
+qcow2 overlay, UEFI variable disk, and NoCloud seed, then removes temporary guest
+resources on completion or interruption.
+
+Checks run as an ordinary guest user. Initialization sets
+`kernel.apparmor_restrict_unprivileged_userns=0` inside the temporary guest so the
+bundled bwrap can use user namespaces, and initializes the guest clock from host
+UTC. The report records the actual setting and clock offset.
+
+Use `--qemu-cache-dir`, `--qemu-efi-dir` (default `/usr/share/qemu-efi-riscv64`),
+`--qemu-cpus`, `--qemu-memory-mib`, `--qemu-boot-timeout`, and `--timeout-scale` to
+adjust QEMU behavior. `--ssh-host` (default `k3`) selects the native host connection.
+Without `--output`, a successful run writes
+`analysis/k3-report-riscv-vX.Y.Z-rN.json` or
+`analysis/qemu-report-riscv-vX.Y.Z-rN.json`; its logs use the report path with `.json`
+replaced by `-logs`. Reports and logs are retained after failures for diagnosing boot,
+SSH, or test failures.
+
+The formal publication asset remains `k3-report.json`; publish preflight accepts both
+the legacy `--k3-report` option and its `--report` alias, and the workflow input remains
+`k3_report_b64`. Historical reports without `validation_target` are accepted as
+`native-k3`; new reports identify `native-k3` or `qemu-system-riscv64`, and release
+notes display the actual target. `--request-publish` only requests the Publish
+workflow; publication still requires protected-environment approval.
+
+已发布的稳定包会在 RISC-V Linux 主机或 QEMU riscv64 客体中进行验证，包括 CLI、sandbox、
+Code Mode 通信、内置 `bwrap` 和 PCRE2 ripgrep 的基本检查。
+
+Published stable packages are checked on a RISC-V Linux host or a QEMU riscv64 guest,
+including basic checks of the CLI, sandbox, Code Mode communication, bundled `bwrap`,
+and PCRE2 ripgrep.
 
 ## 限制与排查 / Limitations and troubleshooting
 
