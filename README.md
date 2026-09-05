@@ -148,6 +148,17 @@ CLI installation; download the asset matching your target from the Release page.
 
 ## 维护者验证 / Maintainer validation
 
+每次实际生成 Candidate 后，Actions 会自动启动独立的 QEMU 验证工作流；9 项检查和
+验证预检通过后，自动启动 Publish。Publish 会核对成功的 QEMU run/attempt、下载其报告，
+并再次检查 Candidate、构建 attestation 和最新上游版本，再通过 `release` 环境发布。
+`release` 环境保留分支限制，不再要求人工审批。报告和日志作为 Actions artifact 保留 14 天。
+构建复用既有正式版本时跳过验证；`force_rebuild` 会强制构建并验证，但发布仍拒绝覆盖
+既有 Release。维护者也可以单独重跑验证：
+
+```sh
+gh workflow run qemu-validate.yml --ref main -f candidate_run_id=RUN_ID
+```
+
 维护者可以用统一验证入口在 K3 主机或 QEMU riscv64 客体中检查 Candidate。默认目标仍是
 K3；旧入口 `scripts/k3_validate.py` 保留兼容性：
 
@@ -159,7 +170,7 @@ python3 scripts/validate.py --target qemu --run-id RUN_ID
 
 `--run-id` 是必需的 Candidate run ID；`--target` 可选且默认为 `k3`，`--policy` 默认为
 `release/policy.toml`，`--output` 可指定报告路径。`--skip-attestation` 仅跳过本地验证中的
-attestation 检查，`--request-publish` 请求发布工作流；两者都不会改变受保护发布审批。
+attestation 检查，`--request-publish` 请求发布工作流；Publish 始终独立检查 attestation。
 
 QEMU 验证要求 Linux 主机上的以下工具和包：
 
@@ -190,10 +201,26 @@ QEMU 参数；`--ssh-host`（默认 `k3`）用于旧的原生入口。未指定 
 时会保留报告和日志，方便定位启动、SSH 或检查失败。
 
 验证报告的正式发布资产名称仍为 `k3-report.json`；发布预检同时接受旧的 `--k3-report` 和
-`--report` 参数，工作流输入仍为 `k3_report_b64`。
+`--report` 参数。自动发布使用 `candidate_run_id`、`validation_run_id` 和
+`validation_run_attempt` 定位成功验证的报告；有仓库写权限的人工维护者仍可使用
+`k3_report_b64` 提交本地报告。这两种报告来源互斥，自动 bot 不能使用手工报告入口。
 历史报告如果没有 `validation_target` 会按 `native-k3` 兼容处理；新报告会明确写入
-`native-k3` 或 `qemu-system-riscv64`，发布说明也会显示实际目标。`--request-publish` 只
-请求 Publish workflow，正式发布仍须通过受保护环境的人工审批。
+`native-k3` 或 `qemu-system-riscv64`，发布说明也会显示实际目标。`--request-publish`
+使用维护者的本地报告入口；Publish 预检通过后自动发布。
+
+Whenever a new Candidate is produced, Actions automatically starts a separate QEMU
+validation workflow. After all nine checks and validation preflight pass, it starts
+Publish. Publish verifies the successful QEMU run and attempt, retrieves its report,
+and independently checks the Candidate, build attestation, and latest upstream
+version before publishing through the `release` environment. The environment retains
+its branch restriction and does not require manual approval. Reports and logs are
+retained as Actions artifacts for 14 days. Reusing an existing formal release skips
+validation; `force_rebuild` builds and validates again, while publication still
+refuses to overwrite an existing Release. Maintainers can also rerun validation:
+
+```sh
+gh workflow run qemu-validate.yml --ref main -f candidate_run_id=RUN_ID
+```
 
 Maintainers can use the single validation entry point against the K3 host or a QEMU
 riscv64 guest. K3 remains the default, and the legacy `scripts/k3_validate.py` entry
@@ -208,8 +235,8 @@ python3 scripts/validate.py --target qemu --run-id RUN_ID
 `--run-id` is the required Candidate run ID. `--target` is optional and defaults to
 `k3`; `--policy` defaults to `release/policy.toml`; and `--output` selects the report
 path. `--skip-attestation` skips only the local attestation check, while
-`--request-publish` requests the publication workflow; neither bypasses protected
-publication approval.
+`--request-publish` requests the publication workflow. Publish always verifies the
+build attestation independently.
 
 QEMU validation requires these host packages on Ubuntu:
 
@@ -246,11 +273,15 @@ replaced by `-logs`. Reports and logs are retained after failures for diagnosing
 SSH, or test failures.
 
 The formal publication asset remains `k3-report.json`; publish preflight accepts both
-the legacy `--k3-report` option and its `--report` alias, and the workflow input remains
-`k3_report_b64`. Historical reports without `validation_target` are accepted as
+the legacy `--k3-report` option and its `--report` alias. Automated publication uses
+`candidate_run_id`, `validation_run_id`, and `validation_run_attempt` to retrieve the
+successful validation report. Human maintainers with repository write access can
+still submit local reports using `k3_report_b64`. The report inputs are mutually
+exclusive, and automation bots cannot use the manual report path.
+Historical reports without `validation_target` are accepted as
 `native-k3`; new reports identify `native-k3` or `qemu-system-riscv64`, and release
-notes display the actual target. `--request-publish` only requests the Publish
-workflow; publication still requires protected-environment approval.
+notes display the actual target. `--request-publish` uses the maintainer's local
+report path; publication proceeds automatically after Publish preflight succeeds.
 
 已发布的稳定包会在 RISC-V Linux 主机或 QEMU riscv64 客体中进行验证，包括 CLI、sandbox、
 Code Mode 通信、内置 `bwrap` 和 PCRE2 ripgrep 的基本检查。

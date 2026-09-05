@@ -7,9 +7,17 @@ on:
         description: Successful Candidate build run ID
         required: true
         type: string
+      validation_run_id:
+        description: Successful QEMU validation run ID (required for automated publication)
+        required: false
+        type: string
+      validation_run_attempt:
+        description: Exact attempt of the QEMU validation run
+        required: false
+        type: string
       k3_report_b64:
-        description: Base64-encoded validation report (stored as k3-report.json)
-        required: true
+        description: Maintainer-only local report; mutually exclusive with the QEMU run inputs
+        required: false
         type: string
 
 permissions:
@@ -21,15 +29,18 @@ concurrency:
 
 jobs:
   preflight:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       actions: read
       contents: read
+      attestations: read
     outputs:
       release_tag: ${{ steps.preflight.outputs.release_tag }}
       candidate_head_sha: ${{ steps.preflight.outputs.candidate_head_sha }}
       validation_target: ${{ steps.preflight.outputs.validation_target }}
+      promotion_artifact: ${{ steps.payload.outputs.name }}
     steps:
       - name: Check out release policy from main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +52,29 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Authenticate and retrieve validation evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_run_attempt }}
+          K3_REPORT_B64: ${{ inputs.k3_report_b64 }}
+        run: |
+          python3 scripts/workflow_handoff.py prepare-report \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --validation-run-id "$VALIDATION_RUN_ID" \
+            --validation-run-attempt "$VALIDATION_RUN_ATTEMPT" \
+            --report-b64 "$K3_REPORT_B64" \
+            --output k3-report.json
+
+      - name: Wait for the selected Candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          python3 scripts/workflow_handoff.py wait-candidate \
+            --run-id "$RUN_ID" --output run.json
+
       - name: Download candidate from the selected run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -49,32 +83,27 @@ jobs:
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
 
-      - name: Decode K3 evidence
-        env:
-          K3_REPORT_B64: ${{ inputs.k3_report_b64 }}
-        run: |
-          python3 - <<'PY'
-          import base64
-          import os
-          from pathlib import Path
-
-          Path("k3-report.json").write_bytes(
-              base64.b64decode(os.environ["K3_REPORT_B64"], validate=True)
-          )
-          PY
-
       - name: Verify selected GitHub run
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" > run.json
           python3 scripts/release.py \
             --release-lock candidate/release-lock.json \
             validate-run \
             --run-json run.json \
             --candidate-dir candidate \
             --run-id "$RUN_ID" >/dev/null
+
+      - name: Verify Candidate build attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify \
+            candidate/codex-package-riscv64gc-unknown-linux-musl.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --source-ref refs/heads/main \
+            --source-digest "$(python3 -c 'import json; print(json.load(open("run.json"))["head_sha"])')" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/candidate-build.yml"
 
       - name: Verify candidate bytes and validation report
         id: preflight
@@ -91,10 +120,14 @@ jobs:
             --k3-report k3-report.json \
             --run-id "${{ inputs.candidate_run_id }}" >/dev/null
 
+      - name: Name exact promotion payload
+        id: payload
+        run: echo "name=verified-promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - name: Stage exact promotion payload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: verified-promotion-${{ inputs.candidate_run_id }}
+          name: ${{ steps.payload.outputs.name }}
           path: |
             candidate/*
             k3-report.json
@@ -120,13 +153,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download approved promotion payload
+      - name: Download verified promotion payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-promotion-${{ inputs.candidate_run_id }}
+          name: ${{ needs.preflight.outputs.promotion_artifact }}
           path: promotion
 
-      - name: Reverify exact bytes after approval
+      - name: Reverify exact bytes before publication
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -164,7 +197,7 @@ jobs:
 
           This release promotes the exact candidate bytes from Actions run
           ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.candidate_run_id }}
-          after ${VALIDATION_TARGET} validation and protected-environment approval.
+          after ${VALIDATION_TARGET} validation and release preflight checks.
           EOF
           gh release create "$RELEASE_TAG" \
             promotion/candidate/* \

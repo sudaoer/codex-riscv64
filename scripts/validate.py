@@ -446,7 +446,7 @@ def _validate(args: argparse.Namespace) -> Path:
                 timeout=_remaining(deadline, 120),
             )
             print(
-                "Publish workflow requested; the release environment still requires approval."
+                "Publish workflow requested; candidate and evidence will be reverified before publication."
             )
         return output
     except BaseException as error:
