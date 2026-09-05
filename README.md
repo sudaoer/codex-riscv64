@@ -172,11 +172,13 @@ python3 scripts/validate.py --target qemu --run-id RUN_ID
 `release/policy.toml`，`--output` 可指定报告路径。`--skip-attestation` 仅跳过本地验证中的
 attestation 检查，`--request-publish` 请求发布工作流；Publish 始终独立检查 attestation。
 
-QEMU 验证要求 Linux 主机上的以下工具和包：
+QEMU 验证使用 Ubuntu 26.04 主机的 QEMU 10.2 和 UEFI 固件组合，Actions 验证 job 也使用
+`ubuntu-26.04`。Ubuntu 24.04 自带的 QEMU 8.2/UEFI 在加载当前固定镜像的内核后停止推进。
+Ubuntu 26.04 上安装以下工具和包：
 
 ```sh
 sudo apt-get update
-sudo apt-get install gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+sudo apt-get install gh qemu-system-riscv qemu-utils qemu-efi-riscv64 \
   cloud-image-utils genisoimage openssh-client
 ```
 
@@ -238,11 +240,13 @@ path. `--skip-attestation` skips only the local attestation check, while
 `--request-publish` requests the publication workflow. Publish always verifies the
 build attestation independently.
 
-QEMU validation requires these host packages on Ubuntu:
+QEMU validation uses Ubuntu 26.04's QEMU 10.2 and UEFI firmware; the Actions
+validation job also uses `ubuntu-26.04`. Ubuntu 24.04's QEMU 8.2/UEFI stalls after
+loading the pinned guest image's kernel. Install these host packages on Ubuntu 26.04:
 
 ```sh
 sudo apt-get update
-sudo apt-get install gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+sudo apt-get install gh qemu-system-riscv qemu-utils qemu-efi-riscv64 \
   cloud-image-utils genisoimage openssh-client
 ```
 

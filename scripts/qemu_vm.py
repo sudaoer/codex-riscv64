@@ -82,8 +82,8 @@ def check_dependencies(config: QemuConfig) -> None:
     missing = [name for name in required if shutil.which(name) is None]
     if missing:
         raise ReleaseError(
-            f"missing QEMU dependencies: {', '.join(missing)}; on Ubuntu install "
-            "qemu-system-misc qemu-utils qemu-efi-riscv64 cloud-image-utils "
+            f"missing QEMU dependencies: {', '.join(missing)}; on Ubuntu 26.04 install "
+            "qemu-system-riscv qemu-utils qemu-efi-riscv64 cloud-image-utils "
             "genisoimage openssh-client"
         )
     for name in ("RISCV_VIRT_CODE.fd", "RISCV_VIRT_VARS.fd"):
