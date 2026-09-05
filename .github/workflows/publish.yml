@@ -184,6 +184,10 @@ jobs:
             echo "Release already exists and will not be overwritten: $RELEASE_TAG" >&2
             exit 1
           fi
+          python3 scripts/release_tag.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$CANDIDATE_HEAD_SHA"
           VALIDATION_TARGET=$(python3 - <<'PY'
           import json
           from pathlib import Path
@@ -204,7 +208,7 @@ jobs:
             promotion/k3-report.json \
             --draft \
             --latest=false \
-            --target "$CANDIDATE_HEAD_SHA" \
+            --verify-tag \
             --title "$RELEASE_TAG" \
             --notes-file release-notes.md
           gh release view "$RELEASE_TAG" --json assets > remote-release.json

@@ -210,6 +210,12 @@ QEMU 参数；`--ssh-host`（默认 `k3`）用于旧的原生入口。未指定 
 `native-k3` 或 `qemu-system-riscv64`，发布说明也会显示实际目标。`--request-publish`
 使用维护者的本地报告入口；Publish 预检通过后自动发布。
 
+Publish 在创建 Release 前先核验或创建指向 Candidate 提交的标签，再使用 `--verify-tag`
+发布。若构建期间 main 的 workflow 文件发生变化，[GitHub API 的权限规则](https://docs.github.com/en/rest/releases/releases#create-a-release)
+可能拒绝 `GITHUB_TOKEN` 为旧提交
+创建标签；维护者可使用 `scripts/release_tag.py` 为已验证的 Candidate 建立准确标签后重跑
+Publish。既有标签指向不同提交时会直接失败。
+
 Whenever a new Candidate is produced, Actions automatically starts a separate QEMU
 validation workflow. After all nine checks and validation preflight pass, it starts
 Publish. Publish verifies the successful QEMU run and attempt, retrieves its report,
@@ -286,6 +292,13 @@ Historical reports without `validation_target` are accepted as
 `native-k3`; new reports identify `native-k3` or `qemu-system-riscv64`, and release
 notes display the actual target. `--request-publish` uses the maintainer's local
 report path; publication proceeds automatically after Publish preflight succeeds.
+
+Before creating a Release, Publish verifies or creates its tag at the Candidate
+commit, then publishes with `--verify-tag`. If workflow files on main change during
+the build, [GitHub's API permission rules](https://docs.github.com/en/rest/releases/releases#create-a-release)
+may reject tag creation at the older commit using `GITHUB_TOKEN`.
+A maintainer can use `scripts/release_tag.py` to establish the exact tag for the
+validated Candidate and rerun Publish. An existing tag at another commit is rejected.
 
 已发布的稳定包会在 RISC-V Linux 主机或 QEMU riscv64 客体中进行验证，包括 CLI、sandbox、
 Code Mode 通信、内置 `bwrap` 和 PCRE2 ripgrep 的基本检查。
