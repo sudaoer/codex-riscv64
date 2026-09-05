@@ -43,6 +43,9 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", QEMU)
         self.assertIn("if: github.ref == 'refs/heads/main'", QEMU)
         self.assertIn("timeout-minutes: 150", QEMU)
+        validation = QEMU.split("\n  continue-chain:\n", 1)[0]
+        self.assertIn("runs-on: ubuntu-26.04", validation)
+        self.assertIn("qemu-system-riscv qemu-utils qemu-efi-riscv64", validation)
         validate = QEMU[: QEMU.index("  continue-chain:\n")]
         self.assertIn("actions: read", validate)
         self.assertNotIn("actions: write", validate)

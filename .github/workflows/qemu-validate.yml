@@ -20,7 +20,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     outputs:
       validation_attempt: ${{ steps.validation_attempt.outputs.attempt }}
-    runs-on: ubuntu-24.04
+    # Noble's QEMU 8.2/UEFI stalls after loading the pinned guest's kernel.
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     permissions:
       actions: read
@@ -41,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+            gh qemu-system-riscv qemu-utils qemu-efi-riscv64 \
             cloud-image-utils genisoimage openssh-client
 
       - name: Resolve QEMU base image digest
