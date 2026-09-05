@@ -1,0 +1,166 @@
+name: QEMU validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Candidate build run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-${{ inputs.candidate_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      validation_attempt: ${{ steps.validation_attempt.outputs.attempt }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install QEMU validation prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gh qemu-system-misc qemu-utils qemu-efi-riscv64 \
+            cloud-image-utils genisoimage openssh-client
+
+      - name: Resolve QEMU base image digest
+        id: qemu_image
+        run: |
+          image_sha256="$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          source = Path("scripts/qemu_vm.py").read_text()
+          match = re.search(r'^IMAGE_SHA256 = "([0-9a-f]{64})"$', source, re.MULTILINE)
+          if match is None:
+              raise SystemExit("scripts/qemu_vm.py has no valid IMAGE_SHA256")
+          print(match.group(1))
+          PY
+          )"
+          echo "sha256=$image_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Cache verified QEMU base image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .work/qemu
+          key: qemu-base-${{ steps.qemu_image.outputs.sha256 }}
+
+      - name: Wait for Candidate completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/qemu-validation"
+          python3 scripts/workflow_handoff.py wait-candidate \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --output "$RUNNER_TEMP/candidate-run.json"
+
+      - name: Run QEMU validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          python3 scripts/validate.py \
+            --target qemu \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --output "$RUNNER_TEMP/qemu-validation/qemu-report.json"
+
+      - name: Record validation attempt
+        id: validation_attempt
+        if: always()
+        run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Write validation summary
+        if: always()
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          QEMU_REPORT_PATH: ${{ runner.temp }}/qemu-validation/qemu-report.json
+        run: |
+          {
+            echo "## QEMU validation"
+            echo
+            echo "- Candidate run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}"
+            echo "- Validation run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            if [[ -f "$RUNNER_TEMP/qemu-validation/qemu-report.json" ]]; then
+              echo "- Report: qemu-report.json"
+              python3 - <<'PY'
+          import os
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path(os.environ["QEMU_REPORT_PATH"]).read_text())
+          print(f"- Result: {report.get('overall', 'unknown')}")
+          print(f"- Target: {report.get('validation_target', 'unknown')}")
+          PY
+            else
+              echo "- Report: unavailable (validation failed before report creation)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload QEMU report and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qemu-validation-${{ github.run_id }}-${{ steps.validation_attempt.outputs.attempt }}
+          path: |
+            ${{ runner.temp }}/qemu-validation/qemu-report.json
+            ${{ runner.temp }}/qemu-validation/qemu-report-logs
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+
+  continue-chain:
+    needs: validate
+    if: >-
+      needs.validate.result == 'success' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch validated publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          ORIGINAL_VALIDATION_ATTEMPT: ${{ needs.validate.outputs.validation_attempt }}
+        run: |
+          if [[ "$ORIGINAL_VALIDATION_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            message="Validation was completed in attempt $ORIGINAL_VALIDATION_ATTEMPT; this dispatcher is attempt $GITHUB_RUN_ATTEMPT. Re-dispatching QEMU validation before publish."
+            echo "$message"
+            echo "- $message" >> "$GITHUB_STEP_SUMMARY"
+            gh workflow run qemu-validate.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref main \
+              -f candidate_run_id="$CANDIDATE_RUN_ID"
+            exit 0
+          fi
+
+          gh workflow run publish.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f candidate_run_id="$CANDIDATE_RUN_ID" \
+            -f validation_run_id="$GITHUB_RUN_ID" \
+            -f validation_run_attempt="$ORIGINAL_VALIDATION_ATTEMPT"

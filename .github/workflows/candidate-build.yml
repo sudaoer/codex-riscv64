@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force_rebuild:
-        description: Rebuild and upload a diagnostic candidate even when a formal release exists
+        description: Force a rebuild but do not overwrite an existing formal release
         required: false
         default: false
         type: boolean
@@ -33,6 +33,8 @@ jobs:
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    outputs:
+      build_required: ${{ steps.decide.outputs.build_required }}
     permissions:
       actions: read
       contents: read
@@ -366,3 +368,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  continue-chain:
+    needs: build
+    if: >-
+      needs.build.result == 'success' &&
+      needs.build.outputs.build_required == 'true' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch QEMU validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run qemu-validate.yml
+          --repo "$GITHUB_REPOSITORY"
+          --ref main
+          -f candidate_run_id="$GITHUB_RUN_ID"
