@@ -12,10 +12,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
+
+
 API_ROOT = "https://api.github.com"
-REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", re.ASCII)
+REPOSITORY_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$", re.ASCII
+)
 TAG_RE = re.compile(r"^riscv-v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$", re.ASCII)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.ASCII)
+
+
 class TagError(RuntimeError):
     """A tag input, API, or tag graph invariant failed."""
 
@@ -24,6 +30,8 @@ class HTTPError(TagError):
     def __init__(self, status: int) -> None:
         self.status = status
         super().__init__(f"GitHub API returned HTTP {status}")
+
+
 def _validate(repository: str, tag: str, commit: str) -> str:
     if not REPOSITORY_RE.fullmatch(repository):
         raise TagError("repository must be an ASCII owner/name")
@@ -32,6 +40,8 @@ def _validate(repository: str, tag: str, commit: str) -> str:
     if not isinstance(commit, str) or SHA_RE.fullmatch(commit.lower()) is None:
         raise TagError("commit must be a 40-hex SHA")
     return commit.lower()
+
+
 class GitHub:
     def __init__(
         self,
@@ -56,7 +66,7 @@ class GitHub:
             "User-Agent": "codex-riscv64-release-tag",
         }
         if body is not None:
-            headers["Content-Type"] = "application/vnd.github+json"
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             API_ROOT + path, data=body, headers=headers, method=method
         )
@@ -64,7 +74,10 @@ class GitHub:
             with urllib.request.urlopen(request, timeout=30) as response:
                 value = json.loads(response.read())
         except urllib.error.HTTPError as error:
-            raise HTTPError(int(error.code)) from error
+            try:
+                error.close()
+            finally:
+                raise HTTPError(int(error.code)) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise TagError("GitHub API request failed") from error
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -72,14 +85,20 @@ class GitHub:
         if not isinstance(value, dict):
             raise TagError("GitHub API returned a JSON value that is not an object")
         return value
+
+
 def _sha(value: Any, label: str) -> str:
     if not isinstance(value, str) or SHA_RE.fullmatch(value.lower()) is None:
         raise TagError(f"{label} is not a valid SHA")
     return value.lower()
+
+
 def _object(value: Any) -> tuple[str, str]:
     if not isinstance(value, Mapping):
         raise TagError("tag ref has no valid object")
     return _sha(value.get("sha"), "tag object SHA"), value.get("type", "")
+
+
 def resolve_commit(
     api: GitHub, tag: str, expected: str, ref: Mapping[str, Any] | None = None
 ) -> str:
@@ -108,6 +127,8 @@ def resolve_commit(
         if _sha(tag_object.get("sha"), "annotated tag SHA") != current:
             raise TagError("annotated tag SHA does not match the requested object")
         current, kind = _object(tag_object.get("object"))
+
+
 def ensure_tag(repository: str, tag: str, commit: str, api: GitHub) -> str:
     expected = _validate(repository, tag, commit)
     encoded = urllib.parse.quote(tag, safe="")
@@ -126,6 +147,8 @@ def ensure_tag(repository: str, tag: str, commit: str, api: GitHub) -> str:
     else:
         return resolve_commit(api, tag, expected, ref=ref)
     return resolve_commit(api, tag, expected)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True)
@@ -144,5 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (TagError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

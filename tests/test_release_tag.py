@@ -5,7 +5,9 @@ import json
 import sys
 import urllib.error
 import unittest
+import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,35 @@ def ref(sha: str, kind: str = "commit") -> dict[str, object]:
 
 
 class ReleaseTagTests(unittest.TestCase):
+    def test_transport_builds_post_with_json_and_bounded_timeout(self) -> None:
+        class Response:
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        body = (
+            b'{"ref":"refs/tags/riscv-v0.153.4-r1","sha":"'
+            + COMMIT.encode()
+            + b'"}'
+        )
+        with patch(
+            "release_tag.urllib.request.urlopen", return_value=Response()
+        ) as opened:
+            api = tag.GitHub("token", REPO)
+            self.assertEqual(api.request("POST", "/repos/x/git/refs", body), {})
+        (request,) = opened.call_args.args
+        self.assertIsInstance(request, urllib.request.Request)
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(json.loads(request.data), json.loads(body))
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
+        self.assertEqual(opened.call_args.kwargs["timeout"], 30)
+
     def test_existing_lightweight_tag_is_verified_without_write(self) -> None:
         api = FakeAPI([ref(COMMIT)])
         self.assertEqual(tag.ensure_tag(REPO, NAME, COMMIT, api), COMMIT)
