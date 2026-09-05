@@ -6,8 +6,9 @@ privately through GitHub Security Advisories rather than a public issue.
 
 Only the latest published downstream release is supported. Upstream Codex
 security fixes are consumed through the stable update workflow, but downstream
-availability is not guaranteed until the patch, build, and native K3 gates all
-pass.
+availability is not guaranteed until the patch, build, and validation gates all pass.
+Validation may run on the native K3 host or inside the managed QEMU riscv64 guest;
+the published report records the actual target.
 
 Release provenance can be checked with GitHub CLI:
 

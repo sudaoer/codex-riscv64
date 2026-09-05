@@ -19,6 +19,7 @@ from release import write_build_info  # noqa: E402
 from release_lib import (  # noqa: E402
     Manifest,
     REQUIRED_K3_TESTS,
+    REQUIRED_VALIDATION_TESTS,
     ReleaseError,
     Toolchain,
     Upstream,
@@ -40,6 +41,7 @@ from release_lib import (  # noqa: E402
     validate_candidate,
     validate_candidate_run,
     validate_v8_artifact,
+    validate_validation_report,
     verify_latest_manifest,
     v8_artifact_names,
     v8_input_descriptor,
@@ -421,6 +423,22 @@ class CandidateTests(unittest.TestCase):
         )
         return path
 
+    def targeted_report(self, target: str = "qemu-system-riscv64") -> Path:
+        path = self.passing_report()
+        report = json.loads(path.read_text())
+        report["validation_target"] = target
+        report["host"] = {"system": "Linux", "machine": "riscv64", "uid": 1000}
+        if target == "qemu-system-riscv64":
+            report["qemu"] = {
+                "accelerator": "tcg",
+                "machine": "virt",
+                "version": "QEMU emulator version 10.1.0",
+                "image_url": "https://cloud-images.example.test/riscv64.img",
+                "image_sha256": "a" * 64,
+            }
+        write_json(path, report)
+        return path
+
     def test_candidate_and_k3_preflight_pass(self) -> None:
         validate_candidate(self.manifest, self.candidate_dir)
         candidate, _ = preflight_publish(
@@ -431,6 +449,83 @@ class CandidateTests(unittest.TestCase):
             now=self.now + dt.timedelta(hours=1),
         )
         self.assertEqual(candidate["release_tag"], self.manifest.release_tag)
+
+    def test_qemu_validation_report_passes(self) -> None:
+        candidate, report = preflight_publish(
+            self.manifest,
+            self.candidate_dir,
+            self.targeted_report(),
+            expected_run_id="12345",
+            now=self.now,
+        )
+        self.assertEqual(candidate["release_tag"], self.manifest.release_tag)
+        self.assertEqual(report["validation_target"], "qemu-system-riscv64")
+
+    def test_explicit_native_validation_requires_riscv64_linux_host(self) -> None:
+        report_path = self.targeted_report("native-k3")
+        report = json.loads(report_path.read_text())
+        report["host"]["machine"] = "x86_64"
+        write_json(report_path, report)
+        with self.assertRaisesRegex(ReleaseError, "machine must be riscv64"):
+            preflight_publish(
+                self.manifest,
+                self.candidate_dir,
+                report_path,
+                expected_run_id="12345",
+                now=self.now,
+            )
+
+    def test_unknown_validation_target_fails(self) -> None:
+        report_path = self.targeted_report()
+        report = json.loads(report_path.read_text())
+        report["validation_target"] = "bare-metal"
+        write_json(report_path, report)
+        with self.assertRaisesRegex(ReleaseError, "unknown validation target"):
+            preflight_publish(
+                self.manifest,
+                self.candidate_dir,
+                report_path,
+                expected_run_id="12345",
+                now=self.now,
+            )
+
+        report["validation_target"] = None
+        write_json(report_path, report)
+        with self.assertRaisesRegex(ReleaseError, "unknown validation target"):
+            preflight_publish(
+                self.manifest,
+                self.candidate_dir,
+                report_path,
+                expected_run_id="12345",
+                now=self.now,
+            )
+
+    def test_qemu_validation_requires_nonzero_uid_and_image_digest(self) -> None:
+        report_path = self.targeted_report()
+        report = json.loads(report_path.read_text())
+        report["host"]["uid"] = -1
+        write_json(report_path, report)
+        with self.assertRaisesRegex(ReleaseError, "uid must be positive"):
+            validate_validation_report(
+                self.manifest,
+                self.candidate,
+                report,
+                now=self.now,
+            )
+
+        report["host"]["uid"] = 1000
+        report["qemu"]["image_sha256"] = "short"
+        write_json(report_path, report)
+        with self.assertRaisesRegex(ReleaseError, "image_sha256"):
+            validate_validation_report(
+                self.manifest,
+                self.candidate,
+                report,
+                now=self.now,
+            )
+
+    def test_required_validation_tests_alias_is_stable(self) -> None:
+        self.assertIs(REQUIRED_K3_TESTS, REQUIRED_VALIDATION_TESTS)
 
     def test_candidate_byte_tampering_fails(self) -> None:
         primary = self.candidate_dir / required_payload_names(self.manifest)[0]

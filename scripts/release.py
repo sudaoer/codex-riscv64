@@ -131,9 +131,18 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-candidate", help="verify candidate bytes")
     validate.add_argument("--candidate-dir", type=Path, required=True)
 
-    preflight = commands.add_parser("preflight", help="verify candidate and K3 evidence")
+    preflight = commands.add_parser(
+        "preflight", help="verify candidate and validation evidence"
+    )
     preflight.add_argument("--candidate-dir", type=Path, required=True)
-    preflight.add_argument("--k3-report", type=Path, required=True)
+    preflight.add_argument(
+        "--k3-report",
+        "--report",
+        dest="k3_report",
+        type=Path,
+        required=True,
+        help="validation report (formal asset name: k3-report.json)",
+    )
     preflight.add_argument("--run-id", required=True)
 
     validate_run = commands.add_parser(
@@ -394,6 +403,7 @@ def main() -> int:
             {
                 "release_tag": candidate["release_tag"],
                 "candidate_head_sha": candidate["candidate_head_sha"],
+                "validation_target": report.get("validation_target", "native-k3"),
             }
         )
         print(
