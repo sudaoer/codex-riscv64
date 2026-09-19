@@ -85,11 +85,11 @@ index bd11f2d41c..af1516cd40 100644
 +The patched zsh resource is optional; it is included only after a
 +`linux-riscv64` artifact is present in the selected zsh DotSlash manifest.
 diff --git a/patches/BUILD.bazel b/patches/BUILD.bazel
-index 81bc6d4efb..3f71ad26e8 100644
+index 2afcf05d1e..2f78c65337 100644
 --- a/patches/BUILD.bazel
 +++ b/patches/BUILD.bazel
-@@ -13,6 +13,7 @@ exports_files([
-     "ring_windows_msvc_include_dirs.patch",
+@@ -20,6 +20,7 @@ exports_files([
+     "tikv-jemalloc-sys_dependency_flags.patch",
      "v8_bazel_rules.patch",
      "v8_module_deps.patch",
 +    "v8_riscv64_bazel_sources.patch",
