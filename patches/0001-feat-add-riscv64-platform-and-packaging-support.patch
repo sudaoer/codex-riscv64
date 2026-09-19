@@ -205,7 +205,7 @@ index 9c7dfabd3d..edb741292c 100755
      npm_tag="linux-x64"
      vendor_target="x86_64-unknown-linux-musl"
 diff --git a/scripts/install/test_install_sh.py b/scripts/install/test_install_sh.py
-index 02d527d608..cc5029f62e 100644
+index a754ab21cf..120463e7ef 100644
 --- a/scripts/install/test_install_sh.py
 +++ b/scripts/install/test_install_sh.py
 @@ -131,6 +131,32 @@ class InstallShTest(unittest.TestCase):
@@ -241,15 +241,15 @@ index 02d527d608..cc5029f62e 100644
      def test_releases_latest_installs_verified_package_by_default(self) -> None:
          with tempfile.TemporaryDirectory() as temp_dir:
              root = Path(temp_dir)
-@@ -534,6 +560,7 @@ def run_installer_in(
+@@ -632,6 +658,7 @@ def run_installer_in(
      releases_checksum_path: Path | None = None,
      legacy_archive_path: Path | None = None,
      force_macos: bool = False,
 +    force_riscv64_linux: bool = False,
      use_mirror: bool | None = False,
      releases_mode: str = "",
- ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-@@ -647,6 +674,17 @@ def run_installer_in(
+     update_guard_from_release: str | None = None,
+@@ -748,6 +775,17 @@ def run_installer_in(
              encoding="utf-8",
          )
          fake_uname.chmod(0o755)
@@ -264,10 +264,10 @@ index 02d527d608..cc5029f62e 100644
 +            encoding="utf-8",
 +        )
 +        fake_uname.chmod(0o755)
- 
-     home = root / "home"
-     home.mkdir(exist_ok=True)
-@@ -706,6 +744,7 @@ def create_package_release(
+     if old_updater_parent_pid is not None:
+         fake_ps = bin_dir / "ps"
+         fake_ps.write_text(
+@@ -836,6 +874,7 @@ def create_package_release(
      root: Path,
      *,
      metadata_version: str = VERSION,
@@ -275,7 +275,7 @@ index 02d527d608..cc5029f62e 100644
  ) -> tuple[Path, Path, str]:
      package_dir = root / "package"
      (package_dir / "bin").mkdir(parents=True)
-@@ -720,8 +759,14 @@ def create_package_release(
+@@ -850,8 +889,14 @@ def create_package_release(
          "#!/bin/sh\nexit 0\n",
      )
      write_executable(package_dir / "codex-path" / "rg", "#!/bin/sh\nexit 0\n")
@@ -291,7 +291,7 @@ index 02d527d608..cc5029f62e 100644
      archive_path = root / asset
      with tarfile.open(archive_path, "w:gz") as archive:
          for path in package_dir.iterdir():
-@@ -790,6 +835,7 @@ def release_metadata(*, compact: bool = False, reorder: bool = False) -> str:
+@@ -920,6 +965,7 @@ def release_metadata(*, compact: bool = False, reorder: bool = False) -> str:
              "aarch64-apple-darwin",
              "x86_64-apple-darwin",
              "aarch64-unknown-linux-musl",
