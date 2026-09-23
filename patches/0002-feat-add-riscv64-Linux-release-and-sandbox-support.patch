@@ -4,14 +4,15 @@ Date: Sat, 8 Aug 2026 23:18:51 +0800
 Subject: [PATCH 2/4] feat: add riscv64 Linux release and sandbox support
 
 ---
- .github/scripts/install-musl-build-tools.sh | 87 ++++++++++++++++-----
- codex-rs/bwrap/build.rs                     | 11 ++-
- codex-rs/core/Cargo.toml                    |  4 +
+ .github/scripts/install-musl-build-tools.sh | 87 ++++++++++++++++++++++-------
+ .github/scripts/install-musl-openssl.sh     |  1 +
+ codex-rs/bwrap/build.rs                     | 11 +++-
+ codex-rs/core/Cargo.toml                    |  4 ++
  codex-rs/linux-sandbox/src/landlock.rs      |  2 +
- 4 files changed, 83 insertions(+), 21 deletions(-)
+ 5 files changed, 84 insertions(+), 21 deletions(-)
 
 diff --git a/.github/scripts/install-musl-build-tools.sh b/.github/scripts/install-musl-build-tools.sh
-index 49035f5391..e081928167 100644
+index a7d37b7ff9..5cd37e3174 100644
 --- a/.github/scripts/install-musl-build-tools.sh
 +++ b/.github/scripts/install-musl-build-tools.sh
 @@ -26,12 +26,32 @@ case "${TARGET}" in
@@ -47,7 +48,7 @@ index 49035f5391..e081928167 100644
  libcap_version="2.75"
  libcap_sha256="de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632"
  libcap_tarball_name="libcap-${libcap_version}.tar.xz"
-@@ -40,18 +60,22 @@ libcap_download_url="https://mirrors.edge.kernel.org/pub/linux/libs/security/lin
+@@ -40,8 +60,17 @@ libcap_download_url="https://mirrors.edge.kernel.org/pub/linux/libs/security/lin
  # Use the musl toolchain as the Rust linker to avoid Zig injecting its own CRT.
  if command -v "${arch}-linux-musl-gcc" >/dev/null; then
    musl_linker="$(command -v "${arch}-linux-musl-gcc")"
@@ -66,7 +67,9 @@ index 49035f5391..e081928167 100644
  else
    echo "musl gcc not found after install; arch=${arch}" >&2
    exit 1
- fi
+@@ -49,11 +78,6 @@ fi
+
+ OPENSSL_CC="${musl_linker}" bash "$(dirname "${BASH_SOURCE[0]}")/install-musl-openssl.sh"
  
 -zig_target="${TARGET/-unknown-linux-musl/-linux-musl}"
 -runner_temp="${RUNNER_TEMP:-/tmp}"
@@ -76,7 +79,7 @@ index 49035f5391..e081928167 100644
  libcap_root="${tool_root}/libcap-${libcap_version}"
  libcap_src_root="${libcap_root}/src"
  libcap_prefix="${libcap_root}/prefix"
-@@ -66,10 +90,14 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
+@@ -68,10 +92,14 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
  
    tar -xJf "${libcap_tarball}" -C "${libcap_src_root}"
    libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
@@ -93,7 +96,7 @@ index 49035f5391..e081928167 100644
  
    cp "${libcap_source_dir}/libcap/libcap.a" "${libcap_prefix}/lib/libcap.a"
    cp "${libcap_source_dir}/libcap/include/uapi/linux/capability.h" "${libcap_prefix}/include/linux/capability.h"
-@@ -229,7 +257,9 @@ else
+@@ -231,7 +259,9 @@ else
  fi
  
  if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
@@ -104,7 +107,7 @@ index 49035f5391..e081928167 100644
    boring_sysroot_var="BORING_BSSL_SYSROOT_${TARGET}"
    boring_sysroot_var="${boring_sysroot_var//-/_}"
    echo "${boring_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
-@@ -243,34 +273,51 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
+@@ -245,34 +275,51 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
    cxxflags="${cxxflags} -Wno-error=frame-larger-than"
  fi
  
@@ -165,7 +168,7 @@ index 49035f5391..e081928167 100644
  pkg_config_path_var="PKG_CONFIG_PATH_${TARGET}"
  pkg_config_path_var="${pkg_config_path_var//-/_}"
  echo "${pkg_config_path_var}=${libcap_pkgconfig_dir}" >> "$GITHUB_ENV"
-@@ -281,7 +328,9 @@ pkg_config_libdir_var="${pkg_config_libdir_var//-/_}"
+@@ -283,7 +330,9 @@ pkg_config_libdir_var="${pkg_config_libdir_var//-/_}"
  echo "${pkg_config_libdir_var}=${libcap_pkgconfig_dir}" >> "$GITHUB_ENV"
  
  if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
@@ -176,6 +179,18 @@ index 49035f5391..e081928167 100644
    pkg_config_sysroot_var="PKG_CONFIG_SYSROOT_DIR_${TARGET}"
    pkg_config_sysroot_var="${pkg_config_sysroot_var//-/_}"
    echo "${pkg_config_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
+diff --git a/.github/scripts/install-musl-openssl.sh b/.github/scripts/install-musl-openssl.sh
+index 15c50c51e4..4e44675b81 100644
+--- a/.github/scripts/install-musl-openssl.sh
++++ b/.github/scripts/install-musl-openssl.sh
+@@ -8,6 +8,7 @@ set -euo pipefail
+ case "${TARGET}" in
+   x86_64-unknown-linux-musl) openssl_target="linux-x86_64" ;;
+   aarch64-unknown-linux-musl) openssl_target="linux-aarch64" ;;
++  riscv64gc-unknown-linux-musl) openssl_target="linux64-riscv64" ;;
+   *) echo "Unexpected musl target: ${TARGET}" >&2; exit 1 ;;
+ esac
+
 diff --git a/codex-rs/bwrap/build.rs b/codex-rs/bwrap/build.rs
 index d9d87932b2..a47060f586 100644
 --- a/codex-rs/bwrap/build.rs
