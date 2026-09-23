@@ -112,9 +112,6 @@ jobs:
         run: |
           python3 scripts/release.py \
             --release-lock candidate/release-lock.json \
-            verify-latest >/dev/null
-          python3 scripts/release.py \
-            --release-lock candidate/release-lock.json \
             preflight \
             --candidate-dir candidate \
             --k3-report k3-report.json \
@@ -163,9 +160,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/release.py \
-            --release-lock promotion/candidate/release-lock.json \
-            verify-latest >/dev/null
           python3 scripts/release.py \
             --release-lock promotion/candidate/release-lock.json \
             preflight \

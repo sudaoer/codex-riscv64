@@ -26,7 +26,6 @@ from release_lib import (
     read_json_object,
     validate_candidate,
     validate_candidate_run,
-    verify_latest_manifest,
     write_json,
 )
 from validation_ssh import SSHConnection
@@ -364,7 +363,6 @@ def _validate(args: argparse.Namespace) -> Path:
             or ROOT / "analysis" / f"{args.target}-report-{manifest.release_tag}.json"
         )
         logs = output.with_suffix("").with_name(f"{output.stem}-logs")
-        verify_latest_manifest(manifest, token=token)
         candidate = validate_candidate(manifest, candidate_dir)
         validate_candidate_run(
             run_info,
@@ -424,7 +422,6 @@ def _validate(args: argparse.Namespace) -> Path:
         write_json(output, report)
         report_written = True
         preflight_publish(manifest, candidate_dir, output, expected_run_id=args.run_id)
-        verify_latest_manifest(manifest, token=token)
         print(f"{target_name(args.target)} report: {output}")
         if args.request_publish:
             encoded = base64.b64encode(output.read_bytes()).decode("ascii")

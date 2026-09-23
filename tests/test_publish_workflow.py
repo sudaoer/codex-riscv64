@@ -25,7 +25,6 @@ class PublishWorkflowTests(unittest.TestCase):
             "scripts/workflow_handoff.py wait-candidate",
             "validate-run",
             "gh attestation verify",
-            "verify-latest",
             "--k3-report k3-report.json",
             "name: Stage exact promotion payload",
         )
@@ -34,6 +33,7 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertIn('--validation-run-id "$VALIDATION_RUN_ID"', self.preflight)
         self.assertIn('--validation-run-attempt "$VALIDATION_RUN_ATTEMPT"', self.preflight)
         self.assertIn("--signer-workflow", self.preflight)
+        self.assertNotIn("verify-latest", self.workflow)
 
     def test_failed_publish_rerun_uses_the_original_preflight_payload(self) -> None:
         self.assertIn(
