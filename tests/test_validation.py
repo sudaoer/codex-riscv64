@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,12 +193,11 @@ class ValidationTests(unittest.TestCase):
                 patch("validate.validate_candidate_run"),
                 patch("validate.load_manifest", return_value=manifest),
                 patch("validate.validate_candidate", return_value=candidate),
-                patch("validate.verify_latest_manifest"),
                 patch("validate.SSHConnection"),
                 patch("validate._run_smoke", return_value=raw),
                 patch(
                     "validate.preflight_publish",
-                    side_effect=ReleaseError("newer release appeared"),
+                    side_effect=ReleaseError("candidate asset hash mismatch"),
                 ),
             ):
                 with self.assertRaises(ReleaseError):
@@ -206,10 +205,80 @@ class ValidationTests(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertEqual(report["overall"], "fail")
             self.assertEqual(report["tests"]["installer"], "pass")
-            self.assertIn("newer release appeared", report["details"]["validator"])
+            self.assertIn(
+                "candidate asset hash mismatch", report["details"]["validator"]
+            )
             self.assertFalse(
                 any("workflow" in str(call) for call in run_mock.call_args_list)
             )
+
+    def test_locked_candidate_validates_after_upstream_advances(self) -> None:
+        for target in ("k3", "qemu"):
+            with (
+                self.subTest(target=target),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                output = Path(directory) / "report.json"
+                args = validate.parser().parse_args(
+                    [
+                        "--run-id",
+                        "42",
+                        "--target",
+                        target,
+                        "--output",
+                        str(output),
+                        "--skip-attestation",
+                    ]
+                )
+                policy = SimpleNamespace(
+                    distribution=SimpleNamespace(repository="owner/repo")
+                )
+                manifest = SimpleNamespace(release_tag="riscv-v0.156.0-r1")
+                candidate = {
+                    "candidate_head_sha": "b" * 40,
+                    "release_tag": manifest.release_tag,
+                    "assets": {"asset": {"sha256": "a" * 64, "size": 1}},
+                }
+                raw = {
+                    "schema_version": 1,
+                    "validation_target": validate.target_name(target),
+                    "overall": "pass",
+                    "host": {"system": "Linux", "machine": "riscv64"},
+                    "tests": {name: "pass" for name in REQUIRED_K3_TESTS},
+                    "details": {"installer": "ok"},
+                    "finished_at": "2026-09-05T00:00:00+00:00",
+                }
+                qemu = MagicMock()
+                qemu.metadata = {"guest": "riscv64"}
+                qemu.__enter__.return_value = SimpleNamespace(
+                    connection=MagicMock(), metadata=qemu.metadata
+                )
+                with (
+                    patch("validate.load_policy", return_value=policy),
+                    patch(
+                        "validate.run",
+                        return_value=subprocess.CompletedProcess([], 0, "token\n", ""),
+                    ),
+                    patch(
+                        "validate.github_run",
+                        return_value={"html_url": "https://example.test/run/42"},
+                    ),
+                    patch("validate.validate_candidate_run"),
+                    patch("validate.load_manifest", return_value=manifest),
+                    patch("validate.validate_candidate", return_value=candidate),
+                    patch("validate.SSHConnection"),
+                    patch("validate._qemu_session", return_value=qemu),
+                    patch("validate._run_smoke", return_value=raw),
+                    patch("validate.preflight_publish") as preflight,
+                    patch(
+                        "release_lib.resolve_latest_stable",
+                        side_effect=ReleaseError("latest is rust-v0.156.1"),
+                    ) as latest,
+                ):
+                    self.assertEqual(validate._validate(args), output)
+                latest.assert_not_called()
+                preflight.assert_called_once()
+                self.assertEqual(json.loads(output.read_text())["overall"], "pass")
 
 
 if __name__ == "__main__":

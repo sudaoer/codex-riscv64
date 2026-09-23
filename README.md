@@ -150,7 +150,8 @@ CLI installation; download the asset matching your target from the Release page.
 
 每次实际生成 Candidate 后，Actions 会自动启动独立的 QEMU 验证工作流；9 项检查和
 验证预检通过后，自动启动 Publish。Publish 会核对成功的 QEMU run/attempt、下载其报告，
-并再次检查 Candidate、构建 attestation 和最新上游版本，再通过 `release` 环境发布。
+并按固定的 release lock 再次检查 Candidate、构建 attestation 和验证报告，再通过
+`release` 环境发布。上游发布新版不影响已锁定版本的验证和发布。
 `release` 环境保留分支限制，不再要求人工审批。报告和日志作为 Actions artifact 保留 14 天。
 构建复用既有正式版本时跳过验证；`force_rebuild` 会强制构建并验证，但发布仍拒绝覆盖
 既有 Release。维护者也可以单独重跑验证：
@@ -219,9 +220,11 @@ Publish。既有标签指向不同提交时会直接失败。
 Whenever a new Candidate is produced, Actions automatically starts a separate QEMU
 validation workflow. After all nine checks and validation preflight pass, it starts
 Publish. Publish verifies the successful QEMU run and attempt, retrieves its report,
-and independently checks the Candidate, build attestation, and latest upstream
-version before publishing through the `release` environment. The environment retains
-its branch restriction and does not require manual approval. Reports and logs are
+and independently checks the Candidate, build attestation, and validation report
+against the immutable release lock before publishing through the `release` environment.
+New upstream releases do not prevent validation or publication of the locked version.
+The environment retains its branch restriction and does not require manual approval.
+Reports and logs are
 retained as Actions artifacts for 14 days. Reusing an existing formal release skips
 validation; `force_rebuild` builds and validates again, while publication still
 refuses to overwrite an existing Release. Maintainers can also rerun validation:
