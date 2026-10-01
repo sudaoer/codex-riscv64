@@ -153,7 +153,9 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(
                 client.pages("/actions/runs?branch=main", "workflow_runs"), []
             )
-        request.assert_called_once_with("/actions/runs?branch=main&per_page=100&page=1")
+        request.assert_called_once_with(
+            "/actions/runs?branch=main&per_page=100&page=1", None, "GET"
+        )
 
     def test_task_identity_tracks_lock_and_source_but_ignores_mapping_order(
         self,
@@ -426,6 +428,7 @@ class RecoveryTests(unittest.TestCase):
         client = FakeGitHub()
         client.load = lambda now: persisted
         client.pages = lambda endpoint, key=None: []
+        client.releases = lambda repository: []
         requested: list[str] = []
 
         def request(endpoint: str) -> dict:
@@ -435,6 +438,7 @@ class RecoveryTests(unittest.TestCase):
             raise error
 
         client.request = request
+        client.read_request = request
         resolver = FakeResolver()
         resolver.policy = SimpleNamespace(
             upstream_repository="openai/codex",
@@ -575,7 +579,7 @@ class StateBranchTests(unittest.TestCase):
         error.close()
         with patch.object(self.client, "request", side_effect=error) as request:
             restored = self.client.load(NOW)
-        request.assert_called_once_with(endpoint)
+        request.assert_called_once_with(endpoint, None, "GET")
         self.assertEqual(restored, state())
         self.assertIsNone(self.client.head)
 
