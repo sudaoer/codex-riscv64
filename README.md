@@ -146,6 +146,43 @@ The Release page also provides separate app-server and Responses API proxy packa
 They are for their respective advanced use cases and are not required for a normal
 CLI installation; download the asset matching your target from the Release page.
 
+## 上游监控 / Upstream monitoring
+
+上游 watcher 每 10 分钟运行一次（cron：`3-59/10 * * * *`），分页检查从 `0.159.3`
+开始的所有正式稳定版本，并补齐缺失的下游版本。GitHub 的定时任务可能延迟。最多同时
+处理两条自动发布链，其余版本按版本号从低到高排队；已开始的版本继续完成。
+
+任务状态和不可变 release lock 保存在 `automation/upstream-state` 分支中，不写入 main。
+每条链锁定上游输入及下游源码 SHA，并用 `task_id` 关联各阶段。相同输入失败后暂停自动
+重试；main 源码 SHA 更新后重新登记。维护者也可以显式重试某个版本：
+
+```sh
+gh workflow run upstream-watch.yml --ref main -f retry_version=X.Y.Z
+```
+
+在 Actions 中重跑已有 run 时会保留其 `task_id`，仍属于同一任务。各版本分别验证和发布；
+Publish 按上游版本及下游 revision 更新 latest，较旧版本晚完成也不会使 latest 回退。
+
+The upstream watcher runs every 10 minutes (cron: `3-59/10 * * * *`), paginates
+through all published stable upstream versions starting at `0.159.3`, and queues
+missing downstream versions. GitHub scheduled runs may be delayed. At most two
+automatic release chains run concurrently; remaining versions wait in ascending
+version order, and started versions continue to completion.
+
+Task state and immutable release locks are persisted on `automation/upstream-state`,
+outside main. Each chain pins its upstream inputs and downstream source SHA and
+uses `task_id` across stages. A failure pauses automatic retries for the same inputs;
+a new main source SHA creates a new task. Maintainers can explicitly retry a version:
+
+```sh
+gh workflow run upstream-watch.yml --ref main -f retry_version=X.Y.Z
+```
+
+Rerunning an existing Actions run retains its `task_id` and belongs to the same task.
+Each version is validated and published independently. Publish compares the upstream
+version and downstream revision before updating latest, so an older version finishing
+later cannot downgrade latest.
+
 ## 维护者验证 / Maintainer validation
 
 每次实际生成 Candidate 后，Actions 会自动启动独立的 QEMU 验证工作流；9 项检查和

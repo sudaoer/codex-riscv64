@@ -207,13 +207,13 @@ class ManifestTests(unittest.TestCase):
             candidate,
         )
 
-    def test_upstream_watcher_reuses_the_formal_release_check(self) -> None:
+    def test_upstream_watcher_uses_lightweight_persistent_scheduler(self) -> None:
         watcher = (ROOT / ".github/workflows/upstream-watch.yml").read_text()
-        self.assertIn("release-state", watcher)
-        self.assertIn("steps.state.outputs.hit == 'false'", watcher)
-        self.assertIn("gh workflow run compat-check.yml", watcher)
-        self.assertIn("-f continue_chain=true", watcher)
-        self.assertNotIn("gh release view", watcher)
+        self.assertIn('cron: "3-59/10 * * * *"', watcher)
+        self.assertIn("scripts/upstream_watch.py", watcher)
+        self.assertIn("retry_version:", watcher)
+        self.assertIn("contents: write", watcher)
+        self.assertNotIn("release-state", watcher)
 
     def test_bot_dispatched_workflows_continue_with_exact_handoffs(self) -> None:
         compat = (ROOT / ".github/workflows/compat-check.yml").read_text()
@@ -405,6 +405,34 @@ class CandidateTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_candidate_seals_source_and_workflow_heads_separately(self) -> None:
+        for name in ("candidate.json", "release.json", "SHA256SUMS"):
+            (self.candidate_dir / name).unlink()
+        candidate = finalize_candidate(
+            self.manifest,
+            self.candidate_dir,
+            run_id="12345",
+            head_sha="2" * 40,
+            workflow_head_sha="4" * 40,
+            source_info_path=self.source_info,
+            created_at=self.now,
+        )
+        self.assertEqual(candidate["candidate_head_sha"], "2" * 40)
+        self.assertEqual(candidate["candidate_workflow_head_sha"], "4" * 40)
+        self.assertEqual(validate_candidate(self.manifest, self.candidate_dir), candidate)
+
+    def test_candidate_workflow_head_defaults_to_source_for_historical_metadata(self) -> None:
+        self.assertEqual(self.candidate["candidate_workflow_head_sha"], "2" * 40)
+        del self.candidate["candidate_workflow_head_sha"]
+        write_json(self.candidate_dir / "candidate.json", self.candidate)
+        self.assertEqual(validate_candidate(self.manifest, self.candidate_dir), self.candidate)
+
+    def test_candidate_rejects_invalid_workflow_head(self) -> None:
+        self.candidate["candidate_workflow_head_sha"] = "invalid"
+        write_json(self.candidate_dir / "candidate.json", self.candidate)
+        with self.assertRaisesRegex(ReleaseError, "workflow head SHA is invalid"):
+            validate_candidate(self.manifest, self.candidate_dir)
 
     def passing_report(self) -> Path:
         path = self.root / "k3-report.json"
@@ -870,6 +898,34 @@ class V8ArtifactTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_v8_seals_source_and_workflow_heads_separately(self) -> None:
+        build_name = v8_artifact_names(self.manifest)[3]
+        (self.v8_dir / build_name).unlink()
+        metadata = finalize_v8_artifact(
+            self.manifest,
+            self.source,
+            self.v8_dir,
+            run_id="45678",
+            head_sha="3" * 40,
+            workflow_head_sha="4" * 40,
+            source_kind="build",
+        )
+        self.assertEqual(metadata["builder"]["head_sha"], "3" * 40)
+        self.assertEqual(metadata["builder"]["workflow_head_sha"], "4" * 40)
+        self.assertEqual(validate_v8_artifact(self.manifest, self.source, self.v8_dir), metadata)
+
+    def test_historical_v8_metadata_remains_valid(self) -> None:
+        self.assertEqual(self.metadata["builder"]["workflow_head_sha"], "3" * 40)
+        del self.metadata["builder"]["workflow_head_sha"]
+        write_json(self.v8_dir / v8_artifact_names(self.manifest)[3], self.metadata)
+        self.assertEqual(validate_v8_artifact(self.manifest, self.source, self.v8_dir), self.metadata)
+
+    def test_v8_rejects_invalid_workflow_head(self) -> None:
+        self.metadata["builder"]["workflow_head_sha"] = "invalid"
+        write_json(self.v8_dir / v8_artifact_names(self.manifest)[3], self.metadata)
+        with self.assertRaisesRegex(ReleaseError, "workflow head SHA is invalid"):
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir)
+
     def test_v8_identity_and_seal_are_deterministic(self) -> None:
         descriptor = v8_input_descriptor(self.manifest, self.source)
         digest = v8_input_digest(descriptor)
@@ -1026,6 +1082,46 @@ class SbomTests(unittest.TestCase):
 
 
 class CandidateRunTests(unittest.TestCase):
+    def test_newer_workflow_head_can_build_a_pinned_source_commit(self) -> None:
+        run = self.run_metadata(".github/workflows/candidate-build.yml")
+        run["head_sha"] = "4" * 40
+        validate_candidate_run(
+            run,
+            expected_run_id="12345",
+            candidate_head_sha="2" * 40,
+            candidate_workflow_head_sha="4" * 40,
+        )
+
+    def test_run_head_must_match_sealed_workflow_head(self) -> None:
+        run = self.run_metadata(".github/workflows/candidate-build.yml")
+        run["head_sha"] = "4" * 40
+        for workflow_head in (None, "5" * 40):
+            with self.subTest(workflow_head=workflow_head), self.assertRaisesRegex(
+                ReleaseError, "GitHub run head SHA does not match candidate"
+            ):
+                validate_candidate_run(
+                    run,
+                    expected_run_id="12345",
+                    candidate_head_sha="2" * 40,
+                    candidate_workflow_head_sha=workflow_head,
+                )
+
+    def test_explicit_workflow_head_keeps_run_identity_checks(self) -> None:
+        for field, value in (
+            ("id", 67890), ("conclusion", "failure"), ("head_branch", "feature"),
+            ("path", ".github/workflows/publish.yml"),
+        ):
+            run = self.run_metadata(".github/workflows/candidate-build.yml")
+            run["head_sha"] = "4" * 40
+            run[field] = value
+            with self.subTest(field=field), self.assertRaises(ReleaseError):
+                validate_candidate_run(
+                    run,
+                    expected_run_id="12345",
+                    candidate_head_sha="2" * 40,
+                    candidate_workflow_head_sha="4" * 40,
+                )
+
     def run_metadata(self, path: str) -> dict[str, object]:
         return {
             "id": 12345,

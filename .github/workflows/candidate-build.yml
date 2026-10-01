@@ -1,4 +1,5 @@
 name: Candidate build
+run-name: ${{ inputs.task_id && format('upstream:{0}', inputs.task_id) || 'Candidate build' }}
 
 on:
   workflow_run:
@@ -6,6 +7,10 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Upstream watcher task identity
+        required: false
+        type: string
       force_rebuild:
         description: Force a rebuild but do not overwrite an existing formal release
         required: false
@@ -284,7 +289,7 @@ jobs:
             --source-dir "${RUNNER_TEMP}/source" \
             --v8-dir "${RUNNER_TEMP}/v8" >/dev/null
           builder_sha="$(python3 -c \
-            'import json,sys; print(json.load(open(sys.argv[1]))["builder"]["head_sha"])' \
+            'import json,sys; builder=json.load(open(sys.argv[1]))["builder"]; print(builder.get("workflow_head_sha", builder["head_sha"]))' \
             "${RUNNER_TEMP}/v8/v8-build.json")"
           for path in "${RUNNER_TEMP}"/v8/*; do
             gh attestation verify "$path" \
@@ -344,7 +349,7 @@ jobs:
       - name: Build and seal candidate
         if: steps.decide.outputs.build_required == 'true'
         env:
-          GITHUB_SHA: ${{ steps.source.outputs.sha }}
+          DOWNSTREAM_SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           bash scripts/build_candidate.sh \
             --source-dir "${RUNNER_TEMP}/source" \
@@ -384,8 +389,10 @@ jobs:
       - name: Dispatch QEMU validation
         env:
           GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
         run: >-
           gh workflow run qemu-validate.yml
           --repo "$GITHUB_REPOSITORY"
           --ref main
           -f candidate_run_id="$GITHUB_RUN_ID"
+          -f task_id="$TASK_ID"

@@ -20,6 +20,7 @@ from typing import Any
 from release_lib import (
     REQUIRED_K3_TESTS,
     ReleaseError,
+    fetch_candidate_policy,
     load_manifest,
     load_policy,
     preflight_publish,
@@ -62,6 +63,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--target", choices=("k3", "qemu"), default="k3")
     result.add_argument("--ssh-host", default="k3")
     result.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
+    result.add_argument(
+        "--candidate-policy",
+        action="store_true",
+        help="validate using policy and patches from the candidate source commit",
+    )
     result.add_argument("--output", type=Path)
     result.add_argument("--skip-attestation", action="store_true")
     result.add_argument("--request-publish", action="store_true")
@@ -357,7 +363,16 @@ def _validate(args: argparse.Namespace) -> Path:
             ],
             timeout=_remaining(deadline, 600),
         )
-        manifest = load_manifest(args.policy, candidate_dir / "release-lock.json")
+        candidate_policy = args.policy
+        if args.candidate_policy:
+            metadata = read_json_object(candidate_dir / "candidate.json")
+            source_sha = metadata.get("candidate_head_sha")
+            if not isinstance(source_sha, str):
+                raise ReleaseError("candidate source SHA is invalid")
+            candidate_policy = fetch_candidate_policy(
+                repository, source_sha, temporary / "locked-source", token=token
+            )
+        manifest = load_manifest(candidate_policy, candidate_dir / "release-lock.json")
         output = (
             args.output
             or ROOT / "analysis" / f"{args.target}-report-{manifest.release_tag}.json"
@@ -368,6 +383,9 @@ def _validate(args: argparse.Namespace) -> Path:
             run_info,
             expected_run_id=args.run_id,
             candidate_head_sha=candidate["candidate_head_sha"],
+            candidate_workflow_head_sha=candidate.get(
+                "candidate_workflow_head_sha", candidate["candidate_head_sha"]
+            ),
         )
         if not args.skip_attestation:
             primary = (
