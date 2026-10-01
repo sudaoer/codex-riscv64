@@ -8,7 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +61,29 @@ class UpstreamWorkflowTests(unittest.TestCase):
         result, written = self.run_lock_step({})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(written, self.lock_bytes)
+
+    def test_metadata_probe_uses_actions_token_and_only_reads_releases(self) -> None:
+        name = "- name: Validate upstream release metadata access\n"
+        step = self.compat.split(name, 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step)
+        block = step.split("python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        script = "\n".join(line[10:] for line in block.splitlines())
+        github = Mock()
+        github.return_value.releases.return_value = [{"tag_name": "rust-v0.159.3"}]
+        output = StringIO()
+        with (
+            patch.dict(os.environ, {"GITHUB_TOKEN": "installation-token", "GITHUB_REPOSITORY": "owner/downstream"}),
+            patch.dict(sys.modules, {"upstream_watch": SimpleNamespace(GitHub=github)}),
+            patch.object(sys, "path", sys.path.copy()),
+            redirect_stdout(output),
+        ):
+            exec(compile(script, "metadata-probe", "exec"), {})
+        github.assert_called_once_with("installation-token", "owner/downstream")
+        github.return_value.releases.assert_called_once_with("openai/codex")
+        self.assertEqual(len(github.mock_calls), 2)
+        self.assertIn("Read 1 upstream release metadata records", output.getvalue())
+        self.assertLess(self.compat.index("Validate downstream release tooling"), self.compat.index(name))
+        self.assertLess(self.compat.index(name), self.compat.index("Resolve stable release lock"))
 
     def test_automatic_task_rejects_unauthorized_or_mismatched_inputs(self) -> None:
         cases = (

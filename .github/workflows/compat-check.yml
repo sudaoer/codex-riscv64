@@ -56,6 +56,22 @@ jobs:
           python3 scripts/release.py validate-policy
           python3 -m unittest discover -s tests -v
 
+      - name: Validate upstream release metadata access
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, "scripts")
+          from upstream_watch import GitHub
+
+          client = GitHub(os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"])
+          releases = client.releases("openai/codex")
+          print(f"Read {len(releases)} upstream release metadata records with the Actions token")
+          PY
+
       - name: Resolve stable release lock
         id: release
         env:

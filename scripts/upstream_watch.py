@@ -7,9 +7,11 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import http.client
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -76,7 +78,7 @@ class GitHub:
         separator = "&" if "?" in endpoint else "?"
         page = 1
         while True:
-            result = self.request(f"{endpoint}{separator}per_page=100&page={page}")
+            result = self.read_request(f"{endpoint}{separator}per_page=100&page={page}")
             items = result[key] if key else result
             if not isinstance(items, list) or any(
                 not isinstance(x, dict) for x in items
@@ -87,16 +89,103 @@ class GitHub:
                 return values
             page += 1
 
+    def read_request(self, endpoint: str, data: Any = None, method: str = "GET") -> Any:
+        if method != "GET" and not (
+            endpoint == "/graphql"
+            and method == "POST"
+            and isinstance(data, dict)
+            and data.get("query", "").lstrip().startswith("query ")
+        ):
+            raise ValueError("only read requests may be retried")
+        for attempt in range(3):
+            try:
+                return self.request(endpoint, data, method)
+            except urllib.error.HTTPError as error:
+                if error.code != 429 and not 500 <= error.code < 600:
+                    raise
+                if attempt == 2:
+                    raise
+            except (
+                http.client.IncompleteRead,
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                json.JSONDecodeError,
+            ):
+                if attempt == 2:
+                    raise
+            time.sleep(attempt + 1)
+        raise AssertionError("read retry attempts exhausted")
+
+    def releases(self, repository: str) -> list[dict[str, Any]]:
+        owner, name = repository.split("/")
+        query = """query ($owner: String!, $name: String!, $cursor: String) {
+          repository(owner: $owner, name: $name) {
+            releases(first: 100, after: $cursor,
+                     orderBy: {field: CREATED_AT, direction: DESC}) {
+              nodes { tagName isDraft isPrerelease }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }"""
+        cursor = None
+        seen = set()
+        releases = []
+        while True:
+            result = self.read_request(
+                "/graphql",
+                {
+                    "query": query,
+                    "variables": {"owner": owner, "name": name, "cursor": cursor},
+                },
+                "POST",
+            )
+            if not isinstance(result, dict) or result.get("errors"):
+                raise ReleaseError("GitHub release metadata query failed")
+            try:
+                connection = result["data"]["repository"]["releases"]
+                nodes = connection["nodes"]
+                info = connection["pageInfo"]
+            except (KeyError, TypeError) as error:
+                raise ReleaseError(
+                    "invalid GitHub release metadata response"
+                ) from error
+            if not isinstance(nodes, list) or not isinstance(info, dict):
+                raise ReleaseError("invalid GitHub release metadata page")
+            for node in nodes:
+                if (
+                    not isinstance(node, dict)
+                    or not isinstance(node.get("tagName"), str)
+                    or not isinstance(node.get("isDraft"), bool)
+                    or not isinstance(node.get("isPrerelease"), bool)
+                ):
+                    raise ReleaseError("invalid GitHub release metadata node")
+                releases.append(
+                    {
+                        "tag_name": node["tagName"],
+                        "draft": node["isDraft"],
+                        "prerelease": node["isPrerelease"],
+                    }
+                )
+            if not isinstance(info.get("hasNextPage"), bool):
+                raise ReleaseError("invalid GitHub release metadata pagination")
+            if not info["hasNextPage"]:
+                return releases
+            cursor = info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise ReleaseError("invalid GitHub release metadata cursor")
+            seen.add(cursor)
+
     def load(self, now: str) -> dict[str, Any]:
         prefix = f"/repos/{self.repository}"
         try:
-            reference = self.request(f"{prefix}/git/ref/heads/{STATE_BRANCH}")
+            reference = self.read_request(f"{prefix}/git/ref/heads/{STATE_BRANCH}")
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
             return {"schema_version": 1, "started_at": now, "tasks": {}}
         self.head = reference["object"]["sha"]
-        value = self.request(f"{prefix}/contents/state.json?ref={self.head}")
+        value = self.read_request(f"{prefix}/contents/state.json?ref={self.head}")
         state = json.loads(base64.b64decode(value["content"]))
         if state.get("schema_version") != 1 or not isinstance(state.get("tasks"), dict):
             raise ReleaseError("unsupported upstream watcher state")
@@ -394,7 +483,7 @@ def main() -> int:
     client = GitHub(token, repository)
     now = timestamp()
     state = client.load(now)
-    upstream = client.pages(f"/repos/{resolver.policy.upstream_repository}/releases")
+    upstream = client.releases(resolver.policy.upstream_repository)
     published = formal_tags(client.pages(f"/repos/{repository}/releases"))
     since = dt.datetime.fromisoformat(now) - dt.timedelta(days=14)
     created = urllib.parse.quote(">=" + since.isoformat(), safe="")
@@ -414,7 +503,7 @@ def main() -> int:
             if run_id in present:
                 continue
             try:
-                run = client.request(f"/repos/{repository}/actions/runs/{run_id}")
+                run = client.read_request(f"/repos/{repository}/actions/runs/{run_id}")
             except urllib.error.HTTPError as error:
                 if error.code != 404:
                     raise
