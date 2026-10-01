@@ -1,4 +1,5 @@
 name: V8 build
+run-name: ${{ inputs.task_id && format('upstream:{0}', inputs.task_id) || 'V8 build' }}
 
 on:
   workflow_run:
@@ -6,6 +7,10 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Upstream watcher task identity
+        required: false
+        type: string
       compatibility_run_id:
         description: Successful Compatibility check run ID for an automated chain
         required: false
@@ -24,7 +29,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: v8-${{ inputs.compatibility_source_sha || github.event.workflow_run.head_sha || github.sha }}
+  group: v8-build
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -234,7 +240,7 @@ jobs:
       - name: Build and seal V8
         if: steps.cache.outputs.hit == 'false'
         env:
-          GITHUB_SHA: ${{ steps.source.outputs.sha }}
+          DOWNSTREAM_SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           bash scripts/build_v8.sh \
             --source-dir "${RUNNER_TEMP}/source" \
@@ -276,7 +282,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           builder_sha="$(python3 -c \
-            'import json,sys; print(json.load(open(sys.argv[1]))["builder"]["head_sha"])' \
+            'import json,sys; builder=json.load(open(sys.argv[1]))["builder"]; print(builder.get("workflow_head_sha", builder["head_sha"]))' \
             "${RUNNER_TEMP}/v8/v8-build.json")"
           for path in "${RUNNER_TEMP}"/v8/*; do
             gh attestation verify "$path" \
@@ -341,8 +347,10 @@ jobs:
       - name: Trigger Candidate build
         env:
           GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
         run: |
           gh workflow run candidate-build.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
-            -f v8_run_id="$GITHUB_RUN_ID"
+            -f v8_run_id="$GITHUB_RUN_ID" \
+            -f task_id="$TASK_ID"

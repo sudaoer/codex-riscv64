@@ -1,8 +1,13 @@
 name: Publish validated candidate
+run-name: ${{ inputs.task_id && format('upstream:{0}', inputs.task_id) || 'Publish validated candidate' }}
 
 on:
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Upstream watcher task identity
+        required: false
+        type: string
       candidate_run_id:
         description: Successful Candidate build run ID
         required: true
@@ -25,6 +30,7 @@ permissions:
 
 concurrency:
   group: stable-release
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -83,11 +89,36 @@ jobs:
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Resolve locked candidate source revision
+        id: source
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          candidate = json.loads(Path("candidate/candidate.json").read_text())
+          source_sha = candidate.get("candidate_head_sha")
+          if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("invalid locked candidate source SHA")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"sha={source_sha}\n")
+          PY
+
+      - name: Check out locked candidate release policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          path: locked-source
+          persist-credentials: false
+
       - name: Verify selected GitHub run
         env:
           RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           python3 scripts/release.py \
+            --policy locked-source/release/policy.toml \
             --release-lock candidate/release-lock.json \
             validate-run \
             --run-json run.json \
@@ -111,6 +142,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/release.py \
+            --policy locked-source/release/policy.toml \
             --release-lock candidate/release-lock.json \
             preflight \
             --candidate-dir candidate \
@@ -156,11 +188,19 @@ jobs:
           name: ${{ needs.preflight.outputs.promotion_artifact }}
           path: promotion
 
+      - name: Check out locked candidate release policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_head_sha }}
+          path: locked-source
+          persist-credentials: false
+
       - name: Reverify exact bytes before publication
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/release.py \
+            --policy locked-source/release/policy.toml \
             --release-lock promotion/candidate/release-lock.json \
             preflight \
             --candidate-dir promotion/candidate \
@@ -170,6 +210,7 @@ jobs:
       - name: Create draft, verify assets, then publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.candidate_head_sha }}
         run: |
@@ -220,4 +261,16 @@ jobs:
                   f"unexpected={sorted(actual - expected)}"
               )
           PY
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          python3 scripts/release.py \
+            --policy locked-source/release/policy.toml \
+            --release-lock promotion/candidate/release-lock.json \
+            latest-state > latest-state.json
+          MAKE_LATEST=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          state = json.loads(Path("latest-state.json").read_text())
+          print("true" if state["make_latest"] else "false")
+          PY
+          )
+          gh release edit "$RELEASE_TAG" --draft=false --latest="$MAKE_LATEST"

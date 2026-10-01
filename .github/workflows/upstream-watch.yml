@@ -2,11 +2,16 @@ name: Upstream stable watcher
 
 on:
   schedule:
-    - cron: "23 19 * * *" # 03:23 Asia/Shanghai
+    - cron: "3-59/10 * * * *"
   workflow_dispatch:
+    inputs:
+      retry_version:
+        description: Stable upstream version to retry (X.Y.Z)
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 concurrency:
@@ -15,8 +20,9 @@ concurrency:
 
 jobs:
   watch:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - name: Check out downstream inputs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,29 +34,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Resolve latest stable release
-        id: release
+      - name: Reconcile and dispatch stable release tasks
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/release.py resolve-latest \
-            --output "${RUNNER_TEMP}/release-lock.json"
-
-      - name: Check downstream release state
-        id: state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/release.py \
-            --release-lock "${RUNNER_TEMP}/release-lock.json" \
-            release-state
-
-      - name: Trigger compatibility and build chain
-        if: steps.state.outputs.hit == 'false'
-        env:
           GH_TOKEN: ${{ github.token }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
         run: |
-          gh workflow run compat-check.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f continue_chain=true
+          python3 scripts/upstream_watch.py --retry-version "$RETRY_VERSION"

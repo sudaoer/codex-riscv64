@@ -78,7 +78,8 @@ python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" finalize-
   --source-dir "$source_dir" \
   --v8-dir "$v8_dir" \
   --run-id "$GITHUB_RUN_ID" \
-  --head-sha "$GITHUB_SHA" \
+  --head-sha "${DOWNSTREAM_SOURCE_SHA:-$GITHUB_SHA}" \
+  --workflow-head-sha "$GITHUB_SHA" \
   --source-kind build
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" validate-v8 \
   --source-dir "$source_dir" \

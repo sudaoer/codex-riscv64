@@ -26,6 +26,7 @@ from release_lib import (
     prepare_source,
     read_json_object,
     resolve_latest_manifest,
+    should_make_latest,
     validate_candidate,
     validate_candidate_run,
     validate_v8_artifact,
@@ -60,6 +61,9 @@ def parser() -> argparse.ArgumentParser:
         "--download-dir",
         type=Path,
         help="directory for downloaded release assets (temporary by default)",
+    )
+    commands.add_parser(
+        "latest-state", help="decide whether the locked release advances latest"
     )
 
     decide_build = commands.add_parser(
@@ -104,6 +108,7 @@ def parser() -> argparse.ArgumentParser:
     finalize_v8.add_argument("--v8-dir", type=Path, required=True)
     finalize_v8.add_argument("--run-id", required=True)
     finalize_v8.add_argument("--head-sha", required=True)
+    finalize_v8.add_argument("--workflow-head-sha")
     finalize_v8.add_argument(
         "--source-kind", choices=("build", "bootstrap"), required=True
     )
@@ -127,6 +132,7 @@ def parser() -> argparse.ArgumentParser:
     finalize.add_argument("--source-info", type=Path, required=True)
     finalize.add_argument("--run-id", required=True)
     finalize.add_argument("--head-sha", required=True)
+    finalize.add_argument("--workflow-head-sha")
 
     validate = commands.add_parser("validate-candidate", help="verify candidate bytes")
     validate.add_argument("--candidate-dir", type=Path, required=True)
@@ -281,6 +287,14 @@ def main() -> int:
         raise ReleaseError(f"{args.command} requires --release-lock")
     manifest = load_manifest(args.policy, args.release_lock)
 
+    if args.command == "latest-state":
+        make_latest = should_make_latest(
+            manifest,
+            token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"),
+        )
+        github_output({"make_latest": "true" if make_latest else "false"})
+        print(json.dumps({"make_latest": make_latest}, indent=2, sort_keys=True))
+        return 0
     if args.command == "release-state":
         state = check_release_state(
             manifest,
@@ -366,6 +380,7 @@ def main() -> int:
             run_id=args.run_id,
             head_sha=args.head_sha,
             source_kind=args.source_kind,
+            workflow_head_sha=args.workflow_head_sha,
             bootstrap_candidate_run_id=args.bootstrap_candidate_run_id,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -387,6 +402,7 @@ def main() -> int:
             run_id=args.run_id,
             head_sha=args.head_sha,
             source_info_path=args.source_info,
+            workflow_head_sha=args.workflow_head_sha,
         )
         print(json.dumps(candidate, indent=2, sort_keys=True))
     elif args.command == "validate-candidate":
@@ -420,6 +436,9 @@ def main() -> int:
             run,
             expected_run_id=args.run_id,
             candidate_head_sha=candidate["candidate_head_sha"],
+            candidate_workflow_head_sha=candidate.get(
+                "candidate_workflow_head_sha", candidate["candidate_head_sha"]
+            ),
         )
         print(
             json.dumps(

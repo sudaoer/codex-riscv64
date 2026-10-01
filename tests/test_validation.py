@@ -26,6 +26,7 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(args.qemu_cpus, 4)
         self.assertEqual(args.qemu_memory_mib, 4096)
         self.assertIsNone(args.timeout_scale)
+        self.assertFalse(args.candidate_policy)
 
     def test_qemu_defaults_and_scale(self) -> None:
         args = validate.parser().parse_args(
@@ -213,7 +214,7 @@ class ValidationTests(unittest.TestCase):
             )
 
     def test_locked_candidate_validates_after_upstream_advances(self) -> None:
-        for target in ("k3", "qemu"):
+        for target, candidate_policy in (("k3", False), ("qemu", False), ("qemu", True)):
             with (
                 self.subTest(target=target),
                 tempfile.TemporaryDirectory() as directory,
@@ -230,6 +231,8 @@ class ValidationTests(unittest.TestCase):
                         "--skip-attestation",
                     ]
                 )
+                args.candidate_policy = candidate_policy
+                pinned_policy = Path(directory) / "locked-source/release/policy.toml"
                 policy = SimpleNamespace(
                     distribution=SimpleNamespace(repository="owner/repo")
                 )
@@ -264,7 +267,9 @@ class ValidationTests(unittest.TestCase):
                         return_value={"html_url": "https://example.test/run/42"},
                     ),
                     patch("validate.validate_candidate_run"),
-                    patch("validate.load_manifest", return_value=manifest),
+                    patch("validate.load_manifest", return_value=manifest) as load_manifest,
+                    patch("validate.read_json_object", return_value=candidate),
+                    patch("validate.fetch_candidate_policy", return_value=pinned_policy) as fetch_policy,
                     patch("validate.validate_candidate", return_value=candidate),
                     patch("validate.SSHConnection"),
                     patch("validate._qemu_session", return_value=qemu),
@@ -278,6 +283,15 @@ class ValidationTests(unittest.TestCase):
                     self.assertEqual(validate._validate(args), output)
                 latest.assert_not_called()
                 preflight.assert_called_once()
+                self.assertEqual(
+                    load_manifest.call_args.args[0],
+                    pinned_policy if candidate_policy else args.policy,
+                )
+                if candidate_policy:
+                    self.assertEqual(fetch_policy.call_args.args[:2], ("owner/repo", "b" * 40))
+                    self.assertEqual(fetch_policy.call_args.kwargs["token"], "token")
+                else:
+                    fetch_policy.assert_not_called()
                 self.assertEqual(json.loads(output.read_text())["overall"], "pass")
 
 

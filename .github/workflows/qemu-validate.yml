@@ -1,8 +1,13 @@
 name: QEMU validation
+run-name: ${{ inputs.task_id && format('upstream:{0}', inputs.task_id) || 'QEMU validation' }}
 
 on:
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Upstream watcher task identity
+        required: false
+        type: string
       candidate_run_id:
         description: Successful Candidate build run ID
         required: true
@@ -85,6 +90,7 @@ jobs:
           python3 scripts/validate.py \
             --target qemu \
             --run-id "$CANDIDATE_RUN_ID" \
+            --candidate-policy \
             --output "$RUNNER_TEMP/qemu-validation/qemu-report.json"
 
       - name: Record validation attempt
@@ -145,6 +151,7 @@ jobs:
       - name: Dispatch validated publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
           ORIGINAL_VALIDATION_ATTEMPT: ${{ needs.validate.outputs.validation_attempt }}
         run: |
@@ -155,7 +162,8 @@ jobs:
             gh workflow run qemu-validate.yml \
               --repo "$GITHUB_REPOSITORY" \
               --ref main \
-              -f candidate_run_id="$CANDIDATE_RUN_ID"
+              -f candidate_run_id="$CANDIDATE_RUN_ID" \
+              -f task_id="$TASK_ID"
             exit 0
           fi
 
@@ -164,4 +172,5 @@ jobs:
             --ref main \
             -f candidate_run_id="$CANDIDATE_RUN_ID" \
             -f validation_run_id="$GITHUB_RUN_ID" \
-            -f validation_run_attempt="$ORIGINAL_VALIDATION_ATTEMPT"
+            -f validation_run_attempt="$ORIGINAL_VALIDATION_ATTEMPT" \
+            -f task_id="$TASK_ID"

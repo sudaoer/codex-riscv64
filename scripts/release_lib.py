@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 TAG_RE = re.compile(r"^rust-v([0-9]+\.[0-9]+\.[0-9]+)$")
+RELEASE_TAG_RE = re.compile(r"^riscv-v([0-9]+)\.([0-9]+)\.([0-9]+)-r([0-9]+)$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET = "riscv64gc-unknown-linux-musl"
 SCHEMA_VERSION = 1
@@ -301,24 +302,30 @@ def load_manifest(policy_path: Path, release_lock_path: Path) -> Manifest:
     return manifest
 
 
-def patch_files(patches_dir: Path) -> list[Path]:
-    series_path = patches_dir / "series"
-    try:
-        names = [
-            line.strip()
-            for line in series_path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-    except OSError as error:
-        raise ReleaseError(f"cannot read patch series: {error}") from error
+def _patch_series_names(contents: str) -> list[str]:
+    names = [
+        line.strip()
+        for line in contents.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     if not names:
         raise ReleaseError("patch series is empty")
     if len(names) != len(set(names)):
         raise ReleaseError("patch series contains duplicate entries")
-    paths: list[Path] = []
     for name in names:
         if Path(name).name != name or not name.endswith(".patch"):
             raise ReleaseError(f"unsafe patch-series entry: {name}")
+    return names
+
+
+def patch_files(patches_dir: Path) -> list[Path]:
+    series_path = patches_dir / "series"
+    try:
+        names = _patch_series_names(series_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as error:
+        raise ReleaseError(f"cannot read patch series: {error}") from error
+    paths: list[Path] = []
+    for name in names:
         path = patches_dir / name
         if not path.is_file():
             raise ReleaseError(f"missing patch-series entry: {path}")
@@ -675,7 +682,7 @@ def prepare_source(
         raise
 
 
-def github_json(url: str, *, token: str | None = None) -> dict[str, Any]:
+def _github_response(url: str, *, token: str | None = None) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "codex-riscv64-release-tools",
@@ -689,9 +696,37 @@ def github_json(url: str, *, token: str | None = None) -> dict[str, Any]:
             value = json.load(response)
     except (OSError, json.JSONDecodeError) as error:
         raise ReleaseError(f"GitHub request failed for {url}: {error}") from error
+    return value
+
+
+def github_json(url: str, *, token: str | None = None) -> dict[str, Any]:
+    value = _github_response(url, token=token)
     if not isinstance(value, dict):
         raise ReleaseError(f"GitHub response is not an object: {url}")
     return value
+
+
+def github_releases(
+    repository: str, *, token: str | None = None
+) -> list[dict[str, Any]]:
+    releases: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        url = (
+            f"https://api.github.com/repos/{repository}/releases"
+            f"?per_page=100&page={page}"
+        )
+        value = _github_response(url, token=token)
+        if not isinstance(value, list) or any(
+            not isinstance(item, dict) for item in value
+        ):
+            raise ReleaseError(
+                f"GitHub releases response is not an array of objects: {url}"
+            )
+        releases.extend(value)
+        if len(value) < 100:
+            return releases
+        page += 1
 
 
 def github_repository_file(
@@ -712,6 +747,39 @@ def github_repository_file(
         return base64.b64decode("".join(content.split()), validate=True)
     except ValueError as error:
         raise ReleaseError(f"GitHub contents response is invalid base64: {path}") from error
+
+
+def fetch_candidate_policy(
+    repository: str, source_sha: str, destination: Path, *, token: str | None = None
+) -> Path:
+    if SHA_RE.fullmatch(source_sha) is None:
+        raise ReleaseError("candidate source SHA is invalid")
+    policy_bytes = github_repository_file(
+        repository, "release/policy.toml", source_sha, token=token
+    )
+    series_bytes = github_repository_file(
+        repository, "patches/series", source_sha, token=token
+    )
+    try:
+        names = _patch_series_names(series_bytes.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise ReleaseError(f"cannot decode candidate patch series: {error}") from error
+    policy_path = destination / "release" / "policy.toml"
+    patches_dir = destination / "patches"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    patches_dir.mkdir(parents=True, exist_ok=True)
+    policy_path.write_bytes(policy_bytes)
+    (patches_dir / "series").write_bytes(series_bytes)
+    for name in names:
+        (patches_dir / name).write_bytes(
+            github_repository_file(
+                repository, f"patches/{name}", source_sha, token=token
+            )
+        )
+    policy_document = load_policy(policy_path)
+    if policy_document.distribution.repository != repository:
+        raise ReleaseError("candidate policy distribution repository does not match")
+    return policy_path
 
 
 def resolve_upstream_toolchain(
@@ -765,9 +833,31 @@ def resolve_latest_stable(
     tag = release.get("tag_name")
     if not isinstance(tag, str):
         raise ReleaseError("latest release has no tag_name")
+    return _resolve_stable_release(upstream_repository, tag, token=token)
+
+
+def resolve_stable_tag(
+    upstream_repository: str, tag: str, *, token: str | None = None
+) -> Upstream:
+    encoded_tag = urllib.parse.quote(tag, safe="")
+    release = github_json(
+        f"https://api.github.com/repos/{upstream_repository}/releases/tags/{encoded_tag}",
+        token=token,
+    )
+    if release.get("draft") or release.get("prerelease"):
+        raise ReleaseError(f"release is not a stable published release: {tag}")
+    if release.get("tag_name") != tag:
+        raise ReleaseError(f"release tag does not match requested tag: {tag}")
+    return _resolve_stable_release(upstream_repository, tag, token=token)
+
+
+def _resolve_stable_release(
+    upstream_repository: str, tag: str, *, token: str | None = None
+) -> Upstream:
+    api = f"https://api.github.com/repos/{upstream_repository}"
     match = TAG_RE.fullmatch(tag)
     if match is None:
-        raise ReleaseError(f"latest release tag is not stable Codex: {tag}")
+        raise ReleaseError(f"release tag is not stable Codex: {tag}")
 
     encoded_tag = urllib.parse.quote(tag, safe="")
     reference = github_json(f"{api}/git/ref/tags/{encoded_tag}", token=token)
@@ -808,16 +898,48 @@ def resolve_latest_manifest(
     latest = resolve_latest_stable(
         policy_document.upstream_repository, token=token
     )
-    toolchain = resolve_upstream_toolchain(
-        latest, policy_document.zig, token=token
-    )
+    return _manifest_from_upstream(policy_document, latest, token=token)
+
+
+def resolve_stable_manifest(
+    policy_document: PolicyDocument, tag: str, *, token: str | None = None
+) -> Manifest:
+    upstream = resolve_stable_tag(policy_document.upstream_repository, tag, token=token)
+    return _manifest_from_upstream(policy_document, upstream, token=token)
+
+
+def _manifest_from_upstream(
+    policy_document: PolicyDocument, upstream: Upstream, *, token: str | None = None
+) -> Manifest:
+    toolchain = resolve_upstream_toolchain(upstream, policy_document.zig, token=token)
     manifest = Manifest(
         policy_document=policy_document,
-        upstream=latest,
+        upstream=upstream,
         toolchain=toolchain,
     )
     manifest.validate()
     return manifest
+
+
+def should_make_latest(manifest: Manifest, *, token: str | None = None) -> bool:
+    candidate = RELEASE_TAG_RE.fullmatch(manifest.release_tag)
+    if candidate is None:
+        raise ReleaseError(f"invalid distribution release tag: {manifest.release_tag}")
+    candidate_version = tuple(int(part) for part in candidate.groups())
+    published_versions: list[tuple[int, ...]] = []
+    for release in github_releases(manifest.distribution.repository, token=token):
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str):
+            raise ReleaseError("published release has no tag_name")
+        if not tag.startswith("riscv-v"):
+            continue
+        match = RELEASE_TAG_RE.fullmatch(tag)
+        if match is None or int(match.group(4)) < 1:
+            raise ReleaseError(f"cannot compare published distribution release tag: {tag}")
+        published_versions.append(tuple(int(part) for part in match.groups()))
+    return not published_versions or candidate_version > max(published_versions)
 
 
 def verify_latest_manifest(
@@ -946,6 +1068,7 @@ def finalize_v8_artifact(
     run_id: str,
     head_sha: str,
     source_kind: str,
+    workflow_head_sha: str | None = None,
     bootstrap_candidate_run_id: str | None = None,
     created_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
@@ -953,6 +1076,10 @@ def finalize_v8_artifact(
         raise ReleaseError("V8 run ID must be numeric")
     if SHA_RE.fullmatch(head_sha) is None:
         raise ReleaseError("V8 head SHA is invalid")
+    if workflow_head_sha is None:
+        workflow_head_sha = head_sha
+    if SHA_RE.fullmatch(workflow_head_sha) is None:
+        raise ReleaseError("V8 workflow head SHA is invalid")
     if source_kind not in {"build", "bootstrap"}:
         raise ReleaseError("V8 source kind must be build or bootstrap")
     if source_kind == "bootstrap":
@@ -998,6 +1125,7 @@ def finalize_v8_artifact(
         "workflow": V8_WORKFLOW_PATH,
         "run_id": run_id,
         "head_sha": head_sha,
+        "workflow_head_sha": workflow_head_sha,
         "source_kind": source_kind,
     }
     if bootstrap_candidate_run_id is not None:
@@ -1058,6 +1186,10 @@ def validate_v8_artifact(
         raise ReleaseError("V8 builder run ID is invalid")
     if SHA_RE.fullmatch(str(builder.get("head_sha", ""))) is None:
         raise ReleaseError("V8 builder head SHA is invalid")
+    if SHA_RE.fullmatch(
+        str(builder.get("workflow_head_sha", builder.get("head_sha", "")))
+    ) is None:
+        raise ReleaseError("V8 builder workflow head SHA is invalid")
     if builder.get("source_kind") not in {"build", "bootstrap"}:
         raise ReleaseError("V8 build source kind is invalid")
     if builder.get("source_kind") == "bootstrap" and not str(
@@ -1326,6 +1458,11 @@ def check_release_state(
             identity_errors.append("candidate_run_id")
         if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
             identity_errors.append("candidate_head_sha")
+        workflow_head_sha = candidate.get(
+            "candidate_workflow_head_sha", candidate.get("candidate_head_sha", "")
+        )
+        if SHA_RE.fullmatch(str(workflow_head_sha)) is None:
+            identity_errors.append("candidate_workflow_head_sha")
         source = candidate.get("source")
         if not isinstance(source, dict) or source.get("status") != "ready":
             identity_errors.append("source.status")
@@ -1392,12 +1529,17 @@ def finalize_candidate(
     run_id: str,
     head_sha: str,
     source_info_path: Path,
+    workflow_head_sha: str | None = None,
     created_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
     if not run_id.isdigit():
         raise ReleaseError("candidate run ID must be numeric")
     if SHA_RE.fullmatch(head_sha) is None:
         raise ReleaseError("candidate head SHA is invalid")
+    if workflow_head_sha is None:
+        workflow_head_sha = head_sha
+    if SHA_RE.fullmatch(workflow_head_sha) is None:
+        raise ReleaseError("candidate workflow head SHA is invalid")
     source_info = json.loads(source_info_path.read_text(encoding="utf-8"))
     if source_info.get("status") != "ready":
         raise ReleaseError("source-info does not describe a ready source tree")
@@ -1463,6 +1605,7 @@ def finalize_candidate(
         "schema_version": SCHEMA_VERSION,
         "candidate_run_id": run_id,
         "candidate_head_sha": head_sha,
+        "candidate_workflow_head_sha": workflow_head_sha,
         "created_at": when.astimezone(dt.timezone.utc).isoformat(),
         "release_tag": manifest.release_tag,
         "package_version": manifest.package_version,
@@ -1512,6 +1655,11 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("candidate run ID is invalid")
     if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
         raise ReleaseError("candidate head SHA is invalid")
+    workflow_head_sha = candidate.get(
+        "candidate_workflow_head_sha", candidate.get("candidate_head_sha", "")
+    )
+    if SHA_RE.fullmatch(str(workflow_head_sha)) is None:
+        raise ReleaseError("candidate workflow head SHA is invalid")
     source = candidate.get("source")
     if not isinstance(source, dict) or source.get("status") != "ready":
         raise ReleaseError("candidate source reconstruction is not ready")
@@ -1701,6 +1849,7 @@ def validate_candidate_run(
     *,
     expected_run_id: str,
     candidate_head_sha: str | None = None,
+    candidate_workflow_head_sha: str | None = None,
 ) -> None:
     if str(run.get("id")) != expected_run_id:
         raise ReleaseError("GitHub run ID mismatch")
@@ -1711,7 +1860,14 @@ def validate_candidate_run(
     path = run.get("path")
     if not isinstance(path, str) or path.partition("@")[0] != CANDIDATE_WORKFLOW_PATH:
         raise ReleaseError(f"unexpected candidate workflow path: {path}")
-    if candidate_head_sha is not None and run.get("head_sha") != candidate_head_sha:
+    workflow_head_sha = (
+        candidate_head_sha
+        if candidate_workflow_head_sha is None
+        else candidate_workflow_head_sha
+    )
+    if workflow_head_sha is not None and SHA_RE.fullmatch(workflow_head_sha) is None:
+        raise ReleaseError("candidate workflow head SHA is invalid")
+    if workflow_head_sha is not None and run.get("head_sha") != workflow_head_sha:
         raise ReleaseError("GitHub run head SHA does not match candidate")
 
 

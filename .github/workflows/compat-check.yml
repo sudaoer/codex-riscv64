@@ -1,4 +1,5 @@
 name: Compatibility check
+run-name: ${{ inputs.task_id && format('upstream:{0}', inputs.task_id) || 'Compatibility check' }}
 
 on:
   pull_request:
@@ -9,6 +10,18 @@ on:
       - 'analysis/**'
   workflow_dispatch:
     inputs:
+      task_id:
+        description: Upstream watcher task identity
+        required: false
+        type: string
+      release_lock_b64:
+        description: Base64-encoded immutable release lock
+        required: false
+        type: string
+      downstream_source_sha:
+        description: Exact downstream source revision for the release task
+        required: false
+        type: string
       continue_chain:
         description: Internal flag used by the upstream watcher to continue the build chain
         required: false
@@ -19,8 +32,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: compat-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: compat-${{ inputs.task_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ inputs.task_id == '' }}
 
 jobs:
   check:
@@ -43,13 +56,51 @@ jobs:
           python3 scripts/release.py validate-policy
           python3 -m unittest discover -s tests -v
 
-      - name: Resolve latest stable release lock
+      - name: Resolve stable release lock
         id: release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
+          RELEASE_LOCK_B64: ${{ inputs.release_lock_b64 }}
+          DOWNSTREAM_SOURCE_SHA: ${{ inputs.downstream_source_sha }}
+          CONTINUE_CHAIN: ${{ inputs.continue_chain }}
         run: |
-          python3 scripts/release.py resolve-latest \
-            --output "${RUNNER_TEMP}/release-lock.json"
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          task_id = os.environ["TASK_ID"]
+          lock_b64 = os.environ["RELEASE_LOCK_B64"]
+          source_sha = os.environ["DOWNSTREAM_SOURCE_SHA"]
+          if task_id:
+              if re.fullmatch(r"[0-9a-f]{64}", task_id) is None:
+                  raise SystemExit("invalid upstream task identity")
+              if not lock_b64 or not source_sha:
+                  raise SystemExit("upstream tasks require a release lock and source SHA")
+              if (os.environ["CONTINUE_CHAIN"] != "true"
+                      or os.environ["GITHUB_ACTOR"] != "github-actions[bot]"):
+                  raise SystemExit("upstream tasks must continue the bot-dispatched chain")
+          if source_sha and source_sha != os.environ["GITHUB_SHA"]:
+              raise SystemExit("downstream source SHA does not match the dispatched revision")
+          if lock_b64:
+              lock_bytes = base64.b64decode(lock_b64, validate=True)
+              if task_id:
+                  task_inputs = json.dumps(
+                      {"release_lock": json.loads(lock_bytes), "source_sha": source_sha},
+                      sort_keys=True, separators=(",", ":"),
+                  ).encode()
+                  if hashlib.sha256(task_inputs).hexdigest() != task_id:
+                      raise SystemExit("upstream task identity does not match release inputs")
+              Path(os.environ["RUNNER_TEMP"], "release-lock.json").write_bytes(lock_bytes)
+          PY
+          if [[ -z "$RELEASE_LOCK_B64" ]]; then
+            python3 scripts/release.py resolve-latest \
+              --output "${RUNNER_TEMP}/release-lock.json"
+          fi
           python3 scripts/release.py \
             --release-lock "${RUNNER_TEMP}/release-lock.json" \
             validate
@@ -130,10 +181,12 @@ jobs:
       - name: Trigger V8 build
         env:
           GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
         run: |
           gh workflow run v8-build.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f compatibility_run_id="$GITHUB_RUN_ID" \
             -f compatibility_source_sha="$GITHUB_SHA" \
-            -f continue_chain=true
+            -f continue_chain=true \
+            -f task_id="$TASK_ID"
