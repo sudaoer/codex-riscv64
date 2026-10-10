@@ -57,7 +57,7 @@
     "75d414062f9cea8cb27267fa7ab0d0247633db846e2dee55208f8876dac001c9": {
       "created_at": "2026-10-09T23:00:46.565201+00:00",
       "dispatched_at": "2026-10-09T23:00:46.565201+00:00",
-      "reason": "dispatch requested",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -77,7 +77,7 @@
       "release_tag": "riscv-v0.162.1-r1",
       "runs": {},
       "source_sha": "c84ebf3bb3d8943cc77be9dbf3a7e8837e0866d8",
-      "status": "dispatching",
+      "status": "published",
       "version": "0.162.1"
     },
     "d0242629e501d1cdf002183596d6566618de5f986caa3f5957b132e9047338ef": {
