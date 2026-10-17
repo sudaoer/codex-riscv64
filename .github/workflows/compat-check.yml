@@ -140,7 +140,6 @@ jobs:
             scripts.codex_package.test_cargo \
             scripts.codex_package.test_layout \
             scripts.codex_package.test_targets \
-            scripts.codex_package.test_zsh \
             -v
 
       - name: Set up exact upstream Rust

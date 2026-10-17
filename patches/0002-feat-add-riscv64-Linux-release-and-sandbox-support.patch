@@ -8,7 +8,7 @@ Subject: [PATCH 2/4] feat: add riscv64 Linux release and sandbox support
  .github/scripts/install-musl-openssl.sh     |  1 +
  codex-rs/bwrap/build.rs                     | 11 +++-
  codex-rs/core/Cargo.toml                    |  4 ++
- codex-rs/linux-sandbox/src/landlock.rs      |  2 +
+ codex-rs/linux-sandbox/src/seccomp.rs       |  2 +
  5 files changed, 84 insertions(+), 21 deletions(-)
 
 diff --git a/.github/scripts/install-musl-build-tools.sh b/.github/scripts/install-musl-build-tools.sh
@@ -225,7 +225,7 @@ diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
 index 0fc5d1a865..f18f34724d 100644
 --- a/codex-rs/core/Cargo.toml
 +++ b/codex-rs/core/Cargo.toml
-@@ -132,6 +132,10 @@ openssl-sys = { workspace = true, features = ["vendored"] }
+@@ -139,6 +139,10 @@ openssl-sys = { workspace = true, features = ["vendored"] }
  [target.aarch64-unknown-linux-musl.dependencies]
  openssl-sys = { workspace = true, features = ["vendored"] }
  
@@ -233,14 +233,14 @@ index 0fc5d1a865..f18f34724d 100644
 +[target.riscv64gc-unknown-linux-musl.dependencies]
 +openssl-sys = { workspace = true, features = ["vendored"] }
 +
- [target.'cfg(unix)'.dependencies]
- codex-shell-escalation = { workspace = true }
- 
-diff --git a/codex-rs/linux-sandbox/src/landlock.rs b/codex-rs/linux-sandbox/src/landlock.rs
+ [dev-dependencies]
+ assert_cmd = { workspace = true }
+ assert_matches = { workspace = true }
+diff --git a/codex-rs/linux-sandbox/src/seccomp.rs b/codex-rs/linux-sandbox/src/seccomp.rs
 index 65ba3ebf17..1c02874d16 100644
---- a/codex-rs/linux-sandbox/src/landlock.rs
-+++ b/codex-rs/linux-sandbox/src/landlock.rs
-@@ -255,6 +255,8 @@ fn install_network_seccomp_filter_on_current_thread(
+--- a/codex-rs/linux-sandbox/src/seccomp.rs
++++ b/codex-rs/linux-sandbox/src/seccomp.rs
+@@ -289,6 +289,8 @@ fn install_network_seccomp_filter_on_current_thread(
              TargetArch::x86_64
          } else if cfg!(target_arch = "aarch64") {
              TargetArch::aarch64
