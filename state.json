@@ -144,7 +144,40 @@
     "8f00f7708d7ec6ec3275d3ccc696db11a0f9065357e1f63c6434a7299cbc6f17": {
       "created_at": "2026-10-23T06:53:53.489905+00:00",
       "dispatched_at": "2026-10-23T06:53:53.489905+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow 39914353485: failure",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.99.1",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "6aaac694803004a63c6f393d153c96d22521a6b9",
+          "repository": "openai/codex",
+          "tag": "rust-v0.164.0",
+          "tag_object_sha": "fe3b29455488c2e189e43ad5526a107900c5e1b7",
+          "version": "0.164.0"
+        }
+      },
+      "release_tag": "riscv-v0.164.0-r1",
+      "runs": {
+        "39914353485": {
+          "conclusion": "failure",
+          "id": 39914353485,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-10-23T06:54:44Z"
+        }
+      },
+      "source_sha": "135706cf8262dd8feedbab9b6476377e8517bc7c",
+      "status": "failed",
+      "version": "0.164.0"
+    },
+    "c9f892461ab9b482d97f77ec7db17ce3030ea8c634e2b238ce67562b58d17486": {
+      "created_at": "2026-10-23T12:22:56.877179+00:00",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -163,8 +196,8 @@
       },
       "release_tag": "riscv-v0.164.0-r1",
       "runs": {},
-      "source_sha": "135706cf8262dd8feedbab9b6476377e8517bc7c",
-      "status": "dispatching",
+      "source_sha": "5645a80cbcd2eded99f490dca825b1530ab44e03",
+      "status": "queued",
       "version": "0.164.0"
     },
     "d0242629e501d1cdf002183596d6566618de5f986caa3f5957b132e9047338ef": {
