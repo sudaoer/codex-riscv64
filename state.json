@@ -257,7 +257,7 @@
     "f1c6463d389f4d545a644f7da10177940f7b047df842088922e3f9bcc80e9f25": {
       "created_at": "2026-10-27T20:15:32.991936+00:00",
       "dispatched_at": "2026-10-27T20:15:32.991936+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow is active",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -275,9 +275,34 @@
         }
       },
       "release_tag": "riscv-v0.165.0-r1",
-      "runs": {},
+      "runs": {
+        "40576450564": {
+          "conclusion": "success",
+          "id": 40576450564,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-10-27T20:17:31Z"
+        },
+        "40576704116": {
+          "conclusion": "success",
+          "id": 40576704116,
+          "path": ".github/workflows/v8-build.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-10-27T23:13:32Z"
+        },
+        "40600625049": {
+          "conclusion": null,
+          "id": 40600625049,
+          "path": ".github/workflows/candidate-build.yml",
+          "run_attempt": 1,
+          "status": "in_progress",
+          "updated_at": "2026-10-27T23:13:35Z"
+        }
+      },
       "source_sha": "5645a80cbcd2eded99f490dca825b1530ab44e03",
-      "status": "dispatching",
+      "status": "running",
       "version": "0.165.0"
     }
   }
