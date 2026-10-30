@@ -996,10 +996,14 @@ def _v8_lock_record(manifest: Manifest, source_dir: Path) -> dict[str, str]:
         raise ReleaseError(
             f"locked V8 {version} does not match manifest {manifest.toolchain.rusty_v8}"
         )
-    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
-        raise ReleaseError("V8 Cargo lock record has no valid checksum")
     if not isinstance(source, str) or not source:
         raise ReleaseError("V8 Cargo lock record has no source")
+    if source.startswith("git+"):
+        if re.fullmatch(r"git\+https://[^#]+#[0-9a-f]{40}", source) is None:
+            raise ReleaseError("V8 Cargo Git source has no pinned commit")
+        return {"version": version, "source": source}
+    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise ReleaseError("V8 Cargo lock record has no valid checksum")
     return {"version": version, "source": source, "checksum": checksum}
 
 

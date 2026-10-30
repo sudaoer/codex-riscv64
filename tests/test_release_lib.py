@@ -938,6 +938,29 @@ class V8ArtifactTests(unittest.TestCase):
             self.metadata,
         )
 
+    def test_git_v8_identity_tracks_pinned_commit(self) -> None:
+        lock = self.source / "codex-rs" / "Cargo.lock"
+        source = "git+https://github.com/seanh-oai/rusty_v8.git?rev=" + "b" * 40
+        lock.write_text(
+            '[[package]]\nname = "v8"\n'
+            f'version = "{self.manifest.toolchain.rusty_v8}"\n'
+            f'source = "{source}#{"b" * 40}"\n'
+        )
+        descriptor = v8_input_descriptor(self.manifest, self.source)
+        self.assertEqual(descriptor["v8_crate"]["source"], source + "#" + "b" * 40)
+        before = v8_release_tag(self.manifest, self.source)
+        lock.write_text(lock.read_text().replace("b" * 40, "c" * 40))
+        self.assertNotEqual(v8_release_tag(self.manifest, self.source), before)
+        lock.write_text(lock.read_text().replace("#" + "c" * 40, ""))
+        with self.assertRaisesRegex(ReleaseError, "no pinned commit"):
+            v8_input_descriptor(self.manifest, self.source)
+
+    def test_registry_v8_requires_checksum(self) -> None:
+        lock = self.source / "codex-rs" / "Cargo.lock"
+        lock.write_text(lock.read_text().replace('checksum = "' + "a" * 64 + '"', ""))
+        with self.assertRaisesRegex(ReleaseError, "no valid checksum"):
+            v8_input_descriptor(self.manifest, self.source)
+
     def test_unrelated_cargo_lock_package_does_not_bust_v8_identity(self) -> None:
         before = v8_release_tag(self.manifest, self.source)
         lock = self.source / "codex-rs" / "Cargo.lock"
