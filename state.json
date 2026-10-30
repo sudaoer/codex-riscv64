@@ -5,7 +5,7 @@
     "0681f95c427b03039ee55218674c8ddc66b5220c02aa0d3dfa790ae40e0acc5a": {
       "created_at": "2026-10-30T08:37:08.219189+00:00",
       "dispatched_at": "2026-10-30T08:37:08.219189+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow is active",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -23,9 +23,26 @@
         }
       },
       "release_tag": "riscv-v0.166.0-r1",
-      "runs": {},
+      "runs": {
+        "41027693680": {
+          "conclusion": "success",
+          "id": 41027693680,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-10-30T08:47:48Z"
+        },
+        "41028858472": {
+          "conclusion": null,
+          "id": 41028858472,
+          "path": ".github/workflows/v8-build.yml",
+          "run_attempt": 1,
+          "status": "in_progress",
+          "updated_at": "2026-10-30T08:47:50Z"
+        }
+      },
       "source_sha": "6291300a66c5297f85ea5d345aca7301356ec5a9",
-      "status": "dispatching",
+      "status": "running",
       "version": "0.166.0"
     },
     "16e6ddbc87507bd81fb45fd726b017c8c73c9925e60e685d8149f1cd0ba9f344": {
