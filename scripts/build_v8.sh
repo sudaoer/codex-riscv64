@@ -62,8 +62,6 @@ python3 .github/scripts/run_bazel_with_buildbuddy.py \
   --noexperimental_remote_repo_contents_cache \
   build -c opt \
   --platforms=@llvm//platforms:linux_riscv64_musl \
-  --config=rusty-v8-upstream-libcxx \
-  --config=v8-target-riscv64 \
   "//third_party/v8:rusty_v8_sandbox_release_pair_${target_suffix}" \
   "--build_metadata=COMMIT_SHA=$(git rev-parse HEAD)"
 python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
@@ -71,7 +69,6 @@ python3 .github/scripts/rusty_v8_bazel.py stage-release-pair \
   --target "$target" \
   --compilation-mode opt \
   --output-dir "$v8_dir" \
-  --bazel-config v8-target-riscv64 \
   --sandbox
 
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" finalize-v8 \

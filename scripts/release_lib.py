@@ -27,15 +27,12 @@ SCHEMA_VERSION = 1
 CANDIDATE_WORKFLOW_PATH = ".github/workflows/candidate-build.yml"
 V8_WORKFLOW_PATH = ".github/workflows/v8-build.yml"
 # Bump this whenever the V8 build command or its non-source environment changes.
-V8_BUILDER_REVISION = 1
+V8_BUILDER_REVISION = 2
 V8_BAZELISK_VERSION = "1.28.1"
 V8_RUNNER_IMAGE = "ubuntu-24.04"
 V8_PLATFORM = "linux_riscv64_musl"
 V8_COMPILATION_MODE = "opt"
-V8_BAZEL_CONFIGS = (
-    "rusty-v8-upstream-libcxx",
-    "v8-target-riscv64",
-)
+V8_BAZEL_CONFIGS: tuple[str, ...] = ()
 V8_INPUT_FILES = (
     ".bazelversion",
     ".bazelrc",
