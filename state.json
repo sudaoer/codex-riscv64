@@ -425,6 +425,30 @@
       "source_sha": "5645a80cbcd2eded99f490dca825b1530ab44e03",
       "status": "published",
       "version": "0.165.0"
+    },
+    "fa5baf234767305fcb7b990a9229681fda806633999ce75d5ab46822fa00e53b": {
+      "created_at": "2026-11-01T01:57:43.778366+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.95.0",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+          "repository": "openai/codex",
+          "tag": "rust-v0.166.0",
+          "tag_object_sha": "593389380740f7b4762771573c447ccfdc59742f",
+          "version": "0.166.0"
+        }
+      },
+      "release_tag": "riscv-v0.166.0-r1",
+      "runs": {},
+      "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
+      "status": "queued",
+      "version": "0.166.0"
     }
   }
 }
