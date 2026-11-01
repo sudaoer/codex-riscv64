@@ -96,9 +96,10 @@ CODEX_BWRAP_SHA256="$(sha256sum "$release_dir/bwrap" | awk '{print $1}')"
 cargo build --locked --target "$target" --release \
   --bin codex \
   --bin codex-code-mode-host \
+  --bin codex-exec-server \
   --bin codex-responses-api-proxy \
   --bin codex-app-server
-for binary in codex codex-code-mode-host codex-responses-api-proxy codex-app-server; do
+for binary in codex codex-code-mode-host codex-exec-server codex-responses-api-proxy codex-app-server; do
   "$STRIP" --strip-debug --strip-unneeded "$release_dir/$binary"
 done
 
