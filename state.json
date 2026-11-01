@@ -5,7 +5,7 @@
     "0681f95c427b03039ee55218674c8ddc66b5220c02aa0d3dfa790ae40e0acc5a": {
       "created_at": "2026-10-30T08:37:08.219189+00:00",
       "dispatched_at": "2026-10-30T08:37:08.219189+00:00",
-      "reason": "workflow 41050295056: failure",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -50,7 +50,7 @@
         }
       },
       "source_sha": "6291300a66c5297f85ea5d345aca7301356ec5a9",
-      "status": "failed",
+      "status": "published",
       "version": "0.166.0"
     },
     "16e6ddbc87507bd81fb45fd726b017c8c73c9925e60e685d8149f1cd0ba9f344": {
@@ -143,7 +143,7 @@
     "593ea3030f05f4366128ff068abd07382d16561b8847b9897861b2032863c2c2": {
       "created_at": "2026-10-29T22:57:16.811087+00:00",
       "dispatched_at": "2026-10-29T22:57:16.811087+00:00",
-      "reason": "workflow 40969716294: failure",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -172,7 +172,7 @@
         }
       },
       "source_sha": "872ecb71ab2e512787b87e06f94f1e01135a86bc",
-      "status": "failed",
+      "status": "published",
       "version": "0.166.0"
     },
     "67c23cb0837eca521567b88b104d3fa7b1b0c330faf9cf0c44d247a93471837b": {
@@ -265,7 +265,7 @@
     "ae2bde32ac67813dcc657e6dbf941856844fae0b7409cfffaefd9fc81eb530b3": {
       "created_at": "2026-10-30T06:53:23.232576+00:00",
       "dispatched_at": "2026-10-30T07:05:16.519478+00:00",
-      "reason": "workflow 41017936331: cancelled",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -294,7 +294,7 @@
         }
       },
       "source_sha": "36fc84b89e6a111db2e8a2b7f5665d8c546dedb3",
-      "status": "failed",
+      "status": "published",
       "version": "0.166.0"
     },
     "c9f892461ab9b482d97f77ec7db17ce3030ea8c634e2b238ce67562b58d17486": {
@@ -429,7 +429,7 @@
     "fa5baf234767305fcb7b990a9229681fda806633999ce75d5ab46822fa00e53b": {
       "created_at": "2026-11-01T01:57:43.778366+00:00",
       "dispatched_at": "2026-11-01T01:57:43.778366+00:00",
-      "reason": "dispatch requested",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -449,7 +449,7 @@
       "release_tag": "riscv-v0.166.0-r1",
       "runs": {},
       "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
-      "status": "dispatching",
+      "status": "published",
       "version": "0.166.0"
     }
   }
