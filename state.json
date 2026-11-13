@@ -349,6 +349,30 @@
       "status": "published",
       "version": "0.166.0"
     },
+    "bb61008414083aa238f70ad056c346f55274a978311ea32827e791007f5501af": {
+      "created_at": "2026-11-13T16:13:08.909160+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.95.0",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "d32063f96c2dff1dc96af839b3952abb6acfeda4",
+          "repository": "openai/codex",
+          "tag": "rust-v0.169.0",
+          "tag_object_sha": "a41fe5b443652cbdbee57717fbb9fd78d8d8b32a",
+          "version": "0.169.0"
+        }
+      },
+      "release_tag": "riscv-v0.169.0-r1",
+      "runs": {},
+      "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
+      "status": "queued",
+      "version": "0.169.0"
+    },
     "c9f892461ab9b482d97f77ec7db17ce3030ea8c634e2b238ce67562b58d17486": {
       "created_at": "2026-10-23T12:22:56.877179+00:00",
       "dispatched_at": "2026-10-23T12:22:56.877179+00:00",
@@ -404,7 +428,7 @@
     "d0b89ca68974ba9f7fb08d1ea511344fa48e6640e0c402d1376521d316a2450f": {
       "created_at": "2026-11-13T08:07:55.704397+00:00",
       "dispatched_at": "2026-11-13T08:07:55.704397+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow 43390845168: failure",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -422,9 +446,18 @@
         }
       },
       "release_tag": "riscv-v0.168.0-r1",
-      "runs": {},
+      "runs": {
+        "43390845168": {
+          "conclusion": "failure",
+          "id": 43390845168,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-11-13T08:08:41Z"
+        }
+      },
       "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
-      "status": "dispatching",
+      "status": "failed",
       "version": "0.168.0"
     },
     "d4ba9f5fb93773dcec4c2e526110189218490177dfe624c6246ff0d6c0fd0c20": {
