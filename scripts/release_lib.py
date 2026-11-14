@@ -14,6 +14,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.parser import Parser
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -340,6 +341,33 @@ def patch_series_digest(patches_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def applicable_patches(patches_dir: Path, upstream_version: str) -> list[Path]:
+    if VERSION_RE.fullmatch(upstream_version) is None:
+        raise ReleaseError(f"invalid upstream version: {upstream_version}")
+    version = tuple(map(int, upstream_version.split(".")))
+    selected: list[Path] = []
+    for path in patch_files(patches_dir):
+        headers = Parser().parsestr(path.read_text(encoding="utf-8"), headersonly=True)
+        bounds: dict[str, tuple[int, ...]] = {}
+        for name in ("X-Upstream-Min-Version", "X-Upstream-Before-Version"):
+            values = headers.get_all(name, [])
+            if not values:
+                continue
+            if len(values) != 1 or VERSION_RE.fullmatch(values[0].strip()) is None:
+                raise ReleaseError(f"invalid {name} in {path.name}")
+            bounds[name] = tuple(map(int, values[0].strip().split(".")))
+        minimum = bounds.get("X-Upstream-Min-Version")
+        before = bounds.get("X-Upstream-Before-Version")
+        if minimum is not None and before is not None and minimum >= before:
+            raise ReleaseError(f"empty upstream version range in {path.name}")
+        if minimum is not None and version < minimum:
+            continue
+        if before is not None and version >= before:
+            continue
+        selected.append(path)
+    return selected
+
+
 def check_patch_scope(patches_dir: Path) -> None:
     forbidden = (
         ".github/workflows/",
@@ -560,6 +588,7 @@ def prepare_source(
     source_dir.mkdir(parents=True, exist_ok=True)
     upstream_url = upstream_url or f"https://github.com/{manifest.upstream.repository}.git"
     report_path = report_path or source_dir.parent / "source-info.json"
+    selected_patches = applicable_patches(manifest.patches_dir, manifest.upstream.version)
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "preparing",
@@ -567,7 +596,7 @@ def prepare_source(
         "release_lock_sha256": manifest.release_lock_sha256,
         "upstream": dataclasses.asdict(manifest.upstream),
         "patch_series_sha256": patch_series_digest(manifest.patches_dir),
-        "patches": [path.name for path in patch_files(manifest.patches_dir)],
+        "patches": [path.name for path in selected_patches],
     }
     write_json(report_path, report)
     current_patch: str | None = None
@@ -607,7 +636,7 @@ def prepare_source(
             ["git", "config", "user.email", "codex-riscv64-bot@users.noreply.github.com"],
             cwd=source_dir,
         )
-        for patch in patch_files(manifest.patches_dir):
+        for patch in selected_patches:
             current_patch = patch.name
             run(
                 [

@@ -4,7 +4,7 @@ Date: Sat, 8 Aug 2026 23:19:33 +0800
 Subject: [PATCH] feat: add riscv64 V8 code-mode support
 
 ---
- MODULE.bazel                           |   2 +
+ MODULE.bazel                           |   1 +
  docs/riscv64-linux.md                  |  26 +++++
  patches/BUILD.bazel                    |   1 +
  patches/v8_riscv64_bazel_sources.patch | 138 +++++++++++++++++++++++++
@@ -14,22 +14,14 @@ Subject: [PATCH] feat: add riscv64 V8 code-mode support
  third_party/v8/engine.BUILD.bazel      |  10 ++
  third_party/v8/engine_repository.bzl   |   6 +-
  third_party/v8/highway.BUILD.bazel     |  11 +-
- 10 files changed, 257 insertions(+), 12 deletions(-)
+ 10 files changed, 256 insertions(+), 12 deletions(-)
  create mode 100644 patches/v8_riscv64_bazel_sources.patch
 
 diff --git a/MODULE.bazel b/MODULE.bazel
 index 8059a9048..496d7ee4a 100644
 --- a/MODULE.bazel
 +++ b/MODULE.bazel
-@@ -637,6 +637,7 @@ crate.annotation_select(
-         "aarch64-pc-windows-msvc",
-         "aarch64-unknown-linux-gnu",
-         "aarch64-unknown-linux-musl",
-+        "riscv64gc-unknown-linux-musl",
-         "x86_64-apple-darwin",
-         "x86_64-pc-windows-gnullvm",
-         "x86_64-pc-windows-msvc",
-@@ -835,5 +836,6 @@ engine_repository(
+@@ -835,5 +835,6 @@ engine_repository(
      patch_strip = 3,
      patches = [
          "//patches:v8_source_portability.patch",
