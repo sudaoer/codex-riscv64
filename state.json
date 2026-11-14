@@ -53,6 +53,30 @@
       "status": "published",
       "version": "0.166.0"
     },
+    "12d5d8b51894341934286aaeb1223221fcfd505a14e8f811f436aa5c7afb44af": {
+      "created_at": "2026-11-14T14:06:35.172898+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.95.0",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "d32063f96c2dff1dc96af839b3952abb6acfeda4",
+          "repository": "openai/codex",
+          "tag": "rust-v0.169.0",
+          "tag_object_sha": "a41fe5b443652cbdbee57717fbb9fd78d8d8b32a",
+          "version": "0.169.0"
+        }
+      },
+      "release_tag": "riscv-v0.169.0-r1",
+      "runs": {},
+      "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
+      "status": "queued",
+      "version": "0.169.0"
+    },
     "16e6ddbc87507bd81fb45fd726b017c8c73c9925e60e685d8149f1cd0ba9f344": {
       "created_at": "2026-10-17T04:54:21.051870+00:00",
       "dispatched_at": "2026-10-17T04:54:21.051870+00:00",
@@ -78,6 +102,30 @@
       "source_sha": "e2cb21d23e10bc7e782bde3912863ef85ee19400",
       "status": "published",
       "version": "0.163.0"
+    },
+    "225505bf4dabdaf058514001366d6390ecfed0670157a6e7a304d1cb1404b323": {
+      "created_at": "2026-11-14T14:06:35.172898+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.95.0",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "9480ec100c3edee9fc69172e8e80a4730444094d",
+          "repository": "openai/codex",
+          "tag": "rust-v0.168.0",
+          "tag_object_sha": "309da486f21e040868f4169723f4fdc8dc4218ec",
+          "version": "0.168.0"
+        }
+      },
+      "release_tag": "riscv-v0.168.0-r1",
+      "runs": {},
+      "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
+      "status": "queued",
+      "version": "0.168.0"
     },
     "266f83363b50a85c4ef5e8fdc4c8dab6a0639e2b9202972ff2b1dc30f38dc031": {
       "created_at": "2026-10-08T20:13:04.299885+00:00",
