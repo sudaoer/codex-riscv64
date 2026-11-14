@@ -56,7 +56,7 @@
     "12d5d8b51894341934286aaeb1223221fcfd505a14e8f811f436aa5c7afb44af": {
       "created_at": "2026-11-14T14:06:35.172898+00:00",
       "dispatched_at": "2026-11-14T14:06:35.172898+00:00",
-      "reason": "workflow is active",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -93,7 +93,7 @@
         }
       },
       "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
-      "status": "running",
+      "status": "published",
       "version": "0.169.0"
     },
     "16e6ddbc87507bd81fb45fd726b017c8c73c9925e60e685d8149f1cd0ba9f344": {
@@ -125,7 +125,7 @@
     "225505bf4dabdaf058514001366d6390ecfed0670157a6e7a304d1cb1404b323": {
       "created_at": "2026-11-14T14:06:35.172898+00:00",
       "dispatched_at": "2026-11-14T14:06:35.172898+00:00",
-      "reason": "workflow is active",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -162,7 +162,7 @@
         }
       },
       "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
-      "status": "running",
+      "status": "published",
       "version": "0.168.0"
     },
     "266f83363b50a85c4ef5e8fdc4c8dab6a0639e2b9202972ff2b1dc30f38dc031": {
@@ -438,7 +438,7 @@
     "bb61008414083aa238f70ad056c346f55274a978311ea32827e791007f5501af": {
       "created_at": "2026-11-13T16:13:08.909160+00:00",
       "dispatched_at": "2026-11-13T16:13:08.909160+00:00",
-      "reason": "workflow 43460515902: failure",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -467,7 +467,7 @@
         }
       },
       "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
-      "status": "failed",
+      "status": "published",
       "version": "0.169.0"
     },
     "c9f892461ab9b482d97f77ec7db17ce3030ea8c634e2b238ce67562b58d17486": {
@@ -525,7 +525,7 @@
     "d0b89ca68974ba9f7fb08d1ea511344fa48e6640e0c402d1376521d316a2450f": {
       "created_at": "2026-11-13T08:07:55.704397+00:00",
       "dispatched_at": "2026-11-13T08:07:55.704397+00:00",
-      "reason": "workflow 43390845168: failure",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -554,7 +554,7 @@
         }
       },
       "source_sha": "4072144e707f76b3e6f2740c4c3a8b7269abf810",
-      "status": "failed",
+      "status": "published",
       "version": "0.168.0"
     },
     "d4ba9f5fb93773dcec4c2e526110189218490177dfe624c6246ff0d6c0fd0c20": {
