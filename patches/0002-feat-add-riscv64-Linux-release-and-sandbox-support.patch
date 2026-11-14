@@ -107,7 +107,7 @@ index a7d37b7ff9..5cd37e3174 100644
    boring_sysroot_var="BORING_BSSL_SYSROOT_${TARGET}"
    boring_sysroot_var="${boring_sysroot_var//-/_}"
    echo "${boring_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
-@@ -245,34 +275,51 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
+@@ -245,16 +275,28 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
    cxxflags="${cxxflags} -Wno-error=frame-larger-than"
  fi
  
@@ -134,14 +134,15 @@ index a7d37b7ff9..5cd37e3174 100644
  target_cxx_var="CXX_${TARGET}"
  target_cxx_var="${target_cxx_var//-/_}"
  echo "${target_cxx_var}=${cxx}" >> "$GITHUB_ENV"
- 
++
 +target_cflags_var="CFLAGS_${TARGET}"
 +target_cflags_var="${target_cflags_var//-/_}"
 +echo "${target_cflags_var}=${cflags}" >> "$GITHUB_ENV"
 +target_cxxflags_var="CXXFLAGS_${TARGET}"
 +target_cxxflags_var="${target_cxxflags_var//-/_}"
 +echo "${target_cxxflags_var}=${cxxflags}" >> "$GITHUB_ENV"
-+
+
+@@ -261,18 +303,23 @@
  cargo_linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
  cargo_linker_var="${cargo_linker_var//-/_}"
  echo "${cargo_linker_var}=${musl_linker}" >> "$GITHUB_ENV"
@@ -225,7 +226,7 @@ diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
 index 0fc5d1a865..f18f34724d 100644
 --- a/codex-rs/core/Cargo.toml
 +++ b/codex-rs/core/Cargo.toml
-@@ -139,6 +139,10 @@ openssl-sys = { workspace = true, features = ["vendored"] }
+@@ -139,4 +139,8 @@ openssl-sys = { workspace = true, features = ["vendored"] }
  [target.aarch64-unknown-linux-musl.dependencies]
  openssl-sys = { workspace = true, features = ["vendored"] }
  
@@ -234,8 +235,6 @@ index 0fc5d1a865..f18f34724d 100644
 +openssl-sys = { workspace = true, features = ["vendored"] }
 +
  [dev-dependencies]
- assert_cmd = { workspace = true }
- assert_matches = { workspace = true }
 diff --git a/codex-rs/linux-sandbox/src/seccomp.rs b/codex-rs/linux-sandbox/src/seccomp.rs
 index 65ba3ebf17..1c02874d16 100644
 --- a/codex-rs/linux-sandbox/src/seccomp.rs
