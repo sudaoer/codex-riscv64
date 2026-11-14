@@ -56,7 +56,7 @@
     "12d5d8b51894341934286aaeb1223221fcfd505a14e8f811f436aa5c7afb44af": {
       "created_at": "2026-11-14T14:06:35.172898+00:00",
       "dispatched_at": "2026-11-14T14:06:35.172898+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow is active",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -74,9 +74,26 @@
         }
       },
       "release_tag": "riscv-v0.169.0-r1",
-      "runs": {},
+      "runs": {
+        "43603149776": {
+          "conclusion": "success",
+          "id": 43603149776,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-11-14T14:15:13Z"
+        },
+        "43603883142": {
+          "conclusion": null,
+          "id": 43603883142,
+          "path": ".github/workflows/v8-build.yml",
+          "run_attempt": 1,
+          "status": "in_progress",
+          "updated_at": "2026-11-14T14:15:15Z"
+        }
+      },
       "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
-      "status": "dispatching",
+      "status": "running",
       "version": "0.169.0"
     },
     "16e6ddbc87507bd81fb45fd726b017c8c73c9925e60e685d8149f1cd0ba9f344": {
@@ -108,7 +125,7 @@
     "225505bf4dabdaf058514001366d6390ecfed0670157a6e7a304d1cb1404b323": {
       "created_at": "2026-11-14T14:06:35.172898+00:00",
       "dispatched_at": "2026-11-14T14:06:35.172898+00:00",
-      "reason": "dispatch requested",
+      "reason": "workflow is active",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -126,9 +143,26 @@
         }
       },
       "release_tag": "riscv-v0.168.0-r1",
-      "runs": {},
+      "runs": {
+        "43603146230": {
+          "conclusion": "success",
+          "id": 43603146230,
+          "path": ".github/workflows/compat-check.yml",
+          "run_attempt": 1,
+          "status": "completed",
+          "updated_at": "2026-11-14T14:17:36Z"
+        },
+        "43604091347": {
+          "conclusion": null,
+          "id": 43604091347,
+          "path": ".github/workflows/v8-build.yml",
+          "run_attempt": 1,
+          "status": "pending",
+          "updated_at": "2026-11-14T14:17:35Z"
+        }
+      },
       "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
-      "status": "dispatching",
+      "status": "running",
       "version": "0.168.0"
     },
     "266f83363b50a85c4ef5e8fdc4c8dab6a0639e2b9202972ff2b1dc30f38dc031": {
