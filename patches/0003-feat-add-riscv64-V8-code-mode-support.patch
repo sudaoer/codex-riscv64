@@ -4,7 +4,7 @@ Date: Sat, 8 Aug 2026 23:19:33 +0800
 Subject: [PATCH] feat: add riscv64 V8 code-mode support
 
 ---
- MODULE.bazel                           |   2 +
+ MODULE.bazel                           |   1 +
  docs/riscv64-linux.md                  |  26 +++++
  patches/BUILD.bazel                    |   1 +
  patches/v8_riscv64_bazel_sources.patch | 138 +++++++++++++++++++++++++
@@ -14,29 +14,20 @@ Subject: [PATCH] feat: add riscv64 V8 code-mode support
  third_party/v8/engine.BUILD.bazel      |  10 ++
  third_party/v8/engine_repository.bzl   |   6 +-
  third_party/v8/highway.BUILD.bazel     |  11 +-
- 10 files changed, 257 insertions(+), 12 deletions(-)
+ 10 files changed, 256 insertions(+), 12 deletions(-)
  create mode 100644 patches/v8_riscv64_bazel_sources.patch
 
 diff --git a/MODULE.bazel b/MODULE.bazel
 index 8059a9048..496d7ee4a 100644
 --- a/MODULE.bazel
 +++ b/MODULE.bazel
-@@ -612,6 +612,7 @@ crate.annotation(
-         "aarch64-pc-windows-msvc": ["v8_enable_sandbox"],
-         "aarch64-unknown-linux-gnu": ["v8_enable_sandbox"],
-         "aarch64-unknown-linux-musl": ["v8_enable_sandbox"],
-+        "riscv64gc-unknown-linux-musl": ["v8_enable_sandbox"],
-         "x86_64-apple-darwin": ["v8_enable_sandbox"],
-         "x86_64-pc-windows-gnullvm": ["v8_enable_sandbox"],
-         "x86_64-pc-windows-msvc": ["v8_enable_sandbox"],
-@@ -835,6 +836,7 @@ engine_repository(
+@@ -835,5 +835,6 @@ engine_repository(
      patch_strip = 3,
      patches = [
          "//patches:v8_source_portability.patch",
 +        "//patches:v8_riscv64_bazel_sources.patch",
          "//patches:v8_array_sort_elements_kind.patch",
          "//third_party/v8:v8_defs.patch",
-     ],
 diff --git a/docs/riscv64-linux.md b/docs/riscv64-linux.md
 index bd11f2d41..af1516cd4 100644
 --- a/docs/riscv64-linux.md
@@ -75,9 +66,7 @@ diff --git a/patches/BUILD.bazel b/patches/BUILD.bazel
 index e402c47ad..44d6e887b 100644
 --- a/patches/BUILD.bazel
 +++ b/patches/BUILD.bazel
-@@ -27,6 +27,7 @@ exports_files([
-     "tikv-jemalloc-sys_dependency_flags.patch",
-     "tonic-zstd-level1.patch",
+@@ -29,4 +29,5 @@ exports_files([
      "v8_array_sort_elements_kind.patch",
 +    "v8_riscv64_bazel_sources.patch",
      "v8_source_portability.patch",
@@ -247,22 +236,19 @@ index 908e9a3ed..1c194c75a 100644
  config_setting(
      name = "use_rusty_v8_custom_libcxx",
      flag_values = {
-@@ -139,6 +148,7 @@ alias(
+@@ -139,5 +148,6 @@ alias(
          # Rust's compiler-builtins archive does not supply V8's __clear_cache.
          # Use the merged archive containing the ARM64 compiler-rt builtins.
          "@llvm//platforms/config:linux_aarch64_musl": ":v8_152_2_0_aarch64_unknown_linux_musl_release",
 +        ":platform_riscv64gc_unknown_linux_musl": ":v8_152_2_0_riscv64gc_unknown_linux_musl_release",
          "@rules_rs//rs/platforms/config:x86_64-apple-darwin": ":v8_152_2_0_x86_64_apple_darwin_bazel",
          "@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": ":v8_152_2_0_x86_64_pc_windows_gnullvm",
-         "@rules_rs//rs/platforms/config:x86_64-pc-windows-msvc": ":v8_152_2_0_x86_64_pc_windows_msvc_bazel",
-@@ -176,6 +186,7 @@ alias(
-         "@rules_rs//rs/platforms/config:aarch64-pc-windows-msvc": ":src_binding_aarch64_pc_windows_msvc_152_2_0_bazel",
+@@ -177,4 +187,5 @@ alias(
          "@llvm//platforms/config:linux_aarch64_gnu": ":src_binding_aarch64_unknown_linux_gnu_152_2_0_bazel",
          "@llvm//platforms/config:linux_aarch64_musl": ":src_binding_aarch64_unknown_linux_musl_152_2_0_bazel",
 +        ":platform_riscv64gc_unknown_linux_musl": ":src_binding_riscv64gc_unknown_linux_musl_152_2_0_bazel",
          "@rules_rs//rs/platforms/config:x86_64-apple-darwin": ":src_binding_x86_64_apple_darwin_152_2_0_bazel",
          "@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": ":src_binding_x86_64_pc_windows_gnullvm_152_2_0_bazel",
-         "@rules_rs//rs/platforms/config:x86_64-pc-windows-msvc": ":src_binding_x86_64_pc_windows_msvc_152_2_0_bazel",
 @@ -223,6 +234,7 @@ cc_library(
      name = "rusty_v8_custom_libcxx_headers",
      defines = select({

@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: codex-riscv64-bot <codex-riscv64-bot@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 23:00:00 +0800
+Subject: [PATCH] feat: 为 RISC-V 启用 V8 sandbox 特性
+X-Upstream-Min-Version: 0.169.0
+
+---
+ MODULE.bazel | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -637,6 +637,7 @@ crate.annotation_select(
+         "aarch64-pc-windows-msvc",
+         "aarch64-unknown-linux-gnu",
+         "aarch64-unknown-linux-musl",
++        "riscv64gc-unknown-linux-musl",
+         "x86_64-apple-darwin",
+         "x86_64-pc-windows-gnullvm",
+         "x86_64-pc-windows-msvc",
