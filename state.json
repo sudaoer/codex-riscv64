@@ -586,7 +586,7 @@
     "d9047441ee59618f10455778c3e618aa89ba64efd45015787c0adc8c13af95d9": {
       "created_at": "2026-11-18T01:41:27.378761+00:00",
       "dispatched_at": "2026-11-18T01:41:27.378761+00:00",
-      "reason": "dispatch requested",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -606,8 +606,32 @@
       "release_tag": "riscv-v0.169.1-r1",
       "runs": {},
       "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
-      "status": "dispatching",
+      "status": "published",
       "version": "0.169.1"
+    },
+    "ea049d1994826c723f78206a7eb0d7ce7074600135e11bd25d0d9808f1e2cf10": {
+      "created_at": "2026-11-18T09:05:48.326366+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.95.0",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "29eb79e9866b3262a777fdf8195c1b9e63684c91",
+          "repository": "openai/codex",
+          "tag": "rust-v0.170.0",
+          "tag_object_sha": "72f97c309fb0f78b6f35cce455adf416e6a51571",
+          "version": "0.170.0"
+        }
+      },
+      "release_tag": "riscv-v0.170.0-r1",
+      "runs": {},
+      "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
+      "status": "queued",
+      "version": "0.170.0"
     },
     "f1c6463d389f4d545a644f7da10177940f7b047df842088922e3f9bcc80e9f25": {
       "created_at": "2026-10-27T20:15:32.991936+00:00",
