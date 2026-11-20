@@ -59,7 +59,9 @@ def positive_int(value: str) -> int:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--run-id", required=True)
+    source = result.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run-id")
+    source.add_argument("--candidate-dir", type=Path, help="本地构建的候选目录")
     result.add_argument("--target", choices=("k3", "qemu"), default="k3")
     result.add_argument("--ssh-host", default="k3")
     result.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
@@ -311,6 +313,50 @@ def _run_smoke(
             pass
 
 
+def _download_candidate(
+    args: argparse.Namespace, repository: str, temporary: Path, deadline: float
+) -> tuple[Path, Path, dict[str, Any]]:
+    token = run(
+        ["gh", "auth", "token"], capture=True, timeout=_remaining(deadline, 60)
+    ).stdout.strip()
+    if not token:
+        raise ReleaseError("gh did not return an authentication token")
+    run_info = github_run(repository, args.run_id, timeout=_remaining(deadline, 60))
+    validate_candidate_run(run_info, expected_run_id=args.run_id)
+    candidate_dir = temporary / "candidate"
+    candidate_dir.mkdir()
+    run(
+        [
+            "gh",
+            "run",
+            "download",
+            args.run_id,
+            "--repo",
+            repository,
+            "--name",
+            "codex-riscv64-candidate",
+            "--dir",
+            str(candidate_dir),
+        ],
+        timeout=_remaining(deadline, 600),
+    )
+    candidate_policy = args.policy
+    if args.candidate_policy:
+        metadata = read_json_object(candidate_dir / "candidate.json")
+        source_sha = metadata.get("candidate_head_sha")
+        if not isinstance(source_sha, str):
+            raise ReleaseError("candidate source SHA is invalid")
+        candidate_policy = fetch_candidate_policy(
+            repository, source_sha, temporary / "locked-source", token=token
+        )
+    return candidate_dir, candidate_policy, run_info
+
+
+def _check_local_report_paths(output: Path, logs: Path, candidate_dir: Path) -> None:
+    if any(path.resolve().is_relative_to(candidate_dir) for path in (output, logs)):
+        raise ReleaseError("验证报告和日志必须写入本地候选目录之外")
+
+
 def _validate(args: argparse.Namespace) -> Path:
     deadline = time.monotonic() + OVERALL_DEADLINE
     timeout_scale = (
@@ -318,83 +364,88 @@ def _validate(args: argparse.Namespace) -> Path:
         if args.timeout_scale is not None
         else (1.0 if args.target == "k3" else 10.0)
     )
-    fallback_output = (
-        args.output or ROOT / "analysis" / f"{args.target}-report-unknown.json"
-    )
-    output = fallback_output
-    logs = output.with_suffix("")
-    logs = logs.with_name(f"{logs.name}-logs")
+    output = args.output or ROOT / "analysis" / f"{args.target}-report-unknown.json"
+    logs = output.with_name(f"{output.stem}-logs")
+    local_dir = args.candidate_dir.resolve() if args.candidate_dir is not None else None
+    if local_dir is not None:
+        if args.candidate_policy or args.skip_attestation or args.request_publish:
+            raise ReleaseError(
+                "--candidate-policy、--skip-attestation 和 --request-publish 仅适用于 --run-id"
+            )
+        _check_local_report_paths(output, logs, local_dir)
+        if args.target == "qemu" and args.qemu_cache_dir.resolve().is_relative_to(
+            local_dir
+        ):
+            raise ReleaseError("QEMU 缓存必须位于本地候选目录之外")
     temporary = Path(tempfile.mkdtemp(prefix="codex-riscv64-validation."))
     report_written = False
-    candidate: dict[str, Any] | None = None
+    binding: dict[str, Any] = {}
     manifest = None
-    run_info: dict[str, Any] | None = None
     qemu_metadata: dict[str, Any] | None = None
     qemu: Any | None = None
     connection: SSHConnection | None = None
     try:
-        policy_document = load_policy(args.policy)
-        repository = policy_document.distribution.repository
-        if not args.run_id.isdigit():
+        repository = load_policy(args.policy).distribution.repository
+        if args.run_id is not None and not args.run_id.isdigit():
             raise ReleaseError("--run-id must be numeric")
         if args.target == "k3":
             connection = SSHConnection(args.ssh_host)
-        token = run(
-            ["gh", "auth", "token"], capture=True, timeout=_remaining(deadline, 60)
-        ).stdout.strip()
-        if not token:
-            raise ReleaseError("gh did not return an authentication token")
-        run_info = github_run(repository, args.run_id, timeout=_remaining(deadline, 60))
-        validate_candidate_run(run_info, expected_run_id=args.run_id)
-        candidate_dir = temporary / "candidate"
-        candidate_dir.mkdir()
-        run(
-            [
-                "gh",
-                "run",
-                "download",
-                args.run_id,
-                "--repo",
-                repository,
-                "--name",
-                "codex-riscv64-candidate",
-                "--dir",
-                str(candidate_dir),
-            ],
-            timeout=_remaining(deadline, 600),
-        )
-        candidate_policy = args.policy
-        if args.candidate_policy:
-            metadata = read_json_object(candidate_dir / "candidate.json")
-            source_sha = metadata.get("candidate_head_sha")
-            if not isinstance(source_sha, str):
-                raise ReleaseError("candidate source SHA is invalid")
-            candidate_policy = fetch_candidate_policy(
-                repository, source_sha, temporary / "locked-source", token=token
+        if local_dir is None:
+            candidate_dir, candidate_policy, run_info = _download_candidate(
+                args, repository, temporary, deadline
             )
+        else:
+            candidate_dir, candidate_policy, run_info = local_dir, args.policy, None
         manifest = load_manifest(candidate_policy, candidate_dir / "release-lock.json")
-        output = (
+        report_output = (
             args.output
             or ROOT / "analysis" / f"{args.target}-report-{manifest.release_tag}.json"
         )
-        logs = output.with_suffix("").with_name(f"{output.stem}-logs")
-        candidate = validate_candidate(manifest, candidate_dir)
-        validate_candidate_run(
-            run_info,
-            expected_run_id=args.run_id,
-            candidate_head_sha=candidate["candidate_head_sha"],
-            candidate_workflow_head_sha=candidate.get(
-                "candidate_workflow_head_sha", candidate["candidate_head_sha"]
-            ),
-        )
-        if not args.skip_attestation:
-            primary = (
-                candidate_dir / f"codex-package-{manifest.distribution.target}.tar.gz"
+        report_logs = report_output.with_name(f"{report_output.stem}-logs")
+        if local_dir is not None:
+            _check_local_report_paths(report_output, report_logs, local_dir)
+        output, logs = report_output, report_logs
+        origin = "local" if local_dir is not None else "github-actions"
+        candidate = validate_candidate(manifest, candidate_dir, expected_origin=origin)
+        binding = {
+            "candidate_head_sha": candidate["candidate_head_sha"],
+            "release_tag": candidate["release_tag"],
+            "assets": candidate["assets"],
+        }
+        smoke_dir = candidate_dir
+        if local_dir is not None:
+            binding.update(build_origin="local", candidate_id=candidate["candidate_id"])
+            smoke_dir = temporary / "candidate"
+            smoke_dir.mkdir()
+            for name in (*candidate["assets"], "candidate.json"):
+                shutil.copyfile(
+                    candidate_dir / name, smoke_dir / name, follow_symlinks=False
+                )
+            snapshot = validate_candidate(manifest, smoke_dir, expected_origin="local")
+            if snapshot != candidate:
+                raise ReleaseError("复制验证输入时本地候选发生变化")
+        else:
+            assert run_info is not None
+            binding.update(
+                candidate_run_id=args.run_id, candidate_run_url=run_info.get("html_url")
             )
-            run(
-                ["gh", "attestation", "verify", str(primary), "--repo", repository],
-                timeout=_remaining(deadline, 600),
+            validate_candidate_run(
+                run_info,
+                expected_run_id=args.run_id,
+                candidate_head_sha=candidate["candidate_head_sha"],
+                candidate_workflow_head_sha=candidate.get(
+                    "candidate_workflow_head_sha", candidate["candidate_head_sha"]
+                ),
             )
+            if not args.skip_attestation:
+                primary = (
+                    candidate_dir
+                    / f"codex-package-{manifest.distribution.target}.tar.gz"
+                )
+                run(
+                    ["gh", "attestation", "verify", str(primary), "--repo", repository],
+                    timeout=_remaining(deadline, 600),
+                )
 
         if args.target == "qemu":
             qemu = _qemu_session(args, temporary, logs, deadline)
@@ -404,7 +455,7 @@ def _validate(args: argparse.Namespace) -> Path:
                 raw_report = _run_smoke(
                     connection,
                     candidate,
-                    candidate_dir,
+                    smoke_dir,
                     temporary,
                     logs,
                     target=args.target,
@@ -413,11 +464,11 @@ def _validate(args: argparse.Namespace) -> Path:
                 )
                 qemu_metadata = dict(vm.metadata)
         else:
-            connection = SSHConnection(args.ssh_host)
+            assert connection is not None
             raw_report = _run_smoke(
                 connection,
                 candidate,
-                candidate_dir,
+                smoke_dir,
                 temporary,
                 logs,
                 target=args.target,
@@ -430,11 +481,7 @@ def _validate(args: argparse.Namespace) -> Path:
             **raw_report,
             "validation_target": target_name(args.target),
             **({"qemu": qemu_metadata} if qemu_metadata is not None else {}),
-            "candidate_run_id": args.run_id,
-            "candidate_run_url": run_info.get("html_url"),
-            "candidate_head_sha": candidate["candidate_head_sha"],
-            "release_tag": candidate["release_tag"],
-            "assets": candidate["assets"],
+            **binding,
             "validated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         write_json(output, report)
@@ -482,18 +529,7 @@ def _validate(args: argparse.Namespace) -> Path:
                 details = dict(raw_failure.get("details", {}))
                 details["validator"] = str(error)[-4_000:]
                 failure["details"] = details
-            if candidate is not None:
-                failure.update(
-                    {
-                        "candidate_run_id": args.run_id,
-                        "candidate_run_url": run_info.get("html_url")
-                        if run_info
-                        else None,
-                        "candidate_head_sha": candidate.get("candidate_head_sha"),
-                        "release_tag": candidate.get("release_tag"),
-                        "assets": candidate.get("assets"),
-                    }
-                )
+            failure.update(binding)
             if manifest is not None:
                 failure["release_tag"] = manifest.release_tag
             try:

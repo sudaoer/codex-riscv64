@@ -36,6 +36,33 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(args.timeout_scale, 2.5)
         self.assertEqual(validate.target_name(args.target), "qemu-system-riscv64")
 
+    def test_candidate_sources_are_mutually_exclusive(self) -> None:
+        for arguments in ([], ["--run-id", "42", "--candidate-dir", "candidate"]):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                validate.parser().parse_args(arguments)
+
+    def test_local_candidate_rejects_actions_options(self) -> None:
+        for option in ("--candidate-policy", "--skip-attestation", "--request-publish"):
+            with self.subTest(option=option), patch("validate.run") as github:
+                args = validate.parser().parse_args(
+                    ["--candidate-dir", "candidate", option]
+                )
+                with self.assertRaisesRegex(ReleaseError, "仅适用于 --run-id"):
+                    validate._validate(args)
+                github.assert_not_called()
+
+    def test_local_report_must_not_write_into_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_dir = Path(directory)
+            output = candidate_dir / "candidate.json"
+            output.write_text("candidate", encoding="utf-8")
+            args = validate.parser().parse_args(
+                ["--candidate-dir", str(candidate_dir), "--output", str(output)]
+            )
+            with self.assertRaisesRegex(ReleaseError, "本地候选目录之外"):
+                validate._validate(args)
+            self.assertEqual(output.read_text(encoding="utf-8"), "candidate")
+
     def test_timeout_scale_must_be_positive_and_finite(self) -> None:
         for value in ("0", "-1", "nan", "inf"):
             with self.assertRaises(SystemExit):
@@ -293,6 +320,83 @@ class ValidationTests(unittest.TestCase):
                 else:
                     fetch_policy.assert_not_called()
                 self.assertEqual(json.loads(output.read_text())["overall"], "pass")
+
+    def test_local_candidate_runs_qemu_and_binds_report_without_github(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            candidate_dir = work / "candidate"
+            candidate_dir.mkdir()
+            output = work / "report.json"
+            args = validate.parser().parse_args(
+                [
+                    "--candidate-dir",
+                    str(candidate_dir),
+                    "--target",
+                    "qemu",
+                    "--output",
+                    str(output),
+                ]
+            )
+            manifest = SimpleNamespace(release_tag="riscv-v1.2.3-r1")
+            candidate = {
+                "build_origin": "local",
+                "candidate_id": "a" * 32,
+                "candidate_head_sha": "b" * 40,
+                "release_tag": manifest.release_tag,
+                "assets": {"asset": {"sha256": "c" * 64, "size": 1}},
+            }
+            (candidate_dir / "asset").write_bytes(b"x")
+            (candidate_dir / "candidate.json").write_text(
+                json.dumps(candidate), encoding="utf-8"
+            )
+            raw = {
+                "schema_version": 1,
+                "validation_target": "qemu-system-riscv64",
+                "overall": "pass",
+                "host": {"system": "Linux", "machine": "riscv64"},
+                "tests": {name: "pass" for name in REQUIRED_K3_TESTS},
+            }
+            qemu = MagicMock()
+            qemu.metadata = {"guest": "riscv64"}
+            connection = MagicMock()
+            qemu.__enter__.return_value = SimpleNamespace(
+                connection=connection, metadata=qemu.metadata
+            )
+
+            def smoke(ssh, metadata, snapshot_dir, *_args, **kwargs):
+                self.assertIs(ssh, connection)
+                self.assertEqual(metadata, candidate)
+                self.assertNotEqual(snapshot_dir, candidate_dir)
+                self.assertEqual((snapshot_dir / "asset").read_bytes(), b"x")
+                self.assertEqual(kwargs["target"], "qemu")
+                return raw
+
+            with (
+                patch("validate.run") as github,
+                patch("validate.load_manifest", return_value=manifest) as load_manifest,
+                patch("validate.validate_candidate", return_value=candidate) as verify,
+                patch("validate._qemu_session", return_value=qemu),
+                patch("validate._run_smoke", side_effect=smoke),
+                patch("validate.preflight_publish") as preflight,
+            ):
+                self.assertEqual(validate._validate(args), output)
+
+            github.assert_not_called()
+            load_manifest.assert_called_once_with(
+                args.policy, candidate_dir / "release-lock.json"
+            )
+            self.assertEqual(verify.call_count, 2)
+            for call in verify.call_args_list:
+                self.assertEqual(call.kwargs["expected_origin"], "local")
+            preflight.assert_called_once_with(
+                manifest, candidate_dir, output, expected_run_id=None
+            )
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["overall"], "pass")
+            for key, value in candidate.items():
+                self.assertEqual(report[key], value)
+            self.assertNotIn("candidate_run_id", report)
+            self.assertNotIn("candidate_run_url", report)
 
 
 if __name__ == "__main__":

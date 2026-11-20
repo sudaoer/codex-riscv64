@@ -208,9 +208,9 @@ diff --git a/scripts/install/test_install_sh.py b/scripts/install/test_install_s
 index a754ab21cf..120463e7ef 100644
 --- a/scripts/install/test_install_sh.py
 +++ b/scripts/install/test_install_sh.py
-@@ -131,6 +131,32 @@ class InstallShTest(unittest.TestCase):
-             )
-             self.assertTrue(os.access(host_path, os.X_OK))
+@@ -109,6 +109,32 @@ class InstallShTest(unittest.TestCase):
+         self.assertIn("/codex-npm-", requests[1])
+         self.assertNotIn("codex-package_SHA256SUMS", requests[1])
  
 +    def test_riscv64_linux_installs_verified_package(self) -> None:
 +        with tempfile.TemporaryDirectory() as temp_dir:
@@ -238,7 +238,7 @@ index a754ab21cf..120463e7ef 100644
 +                f"rust-v{VERSION}/codex-package-{target}.tar.gz",
 +            )
 +
-     def test_noninteractive_install_warns_about_existing_npm_codex(self) -> None:
+     def test_macos_install_exposes_code_mode_host_beside_codex(self) -> None:
          with tempfile.TemporaryDirectory() as temp_dir:
              root = Path(temp_dir)
 @@ -632,6 +658,7 @@ def run_installer_in(

@@ -43,9 +43,7 @@ jobs:
       contents: read
       attestations: read
     outputs:
-      release_tag: ${{ steps.preflight.outputs.release_tag }}
       candidate_head_sha: ${{ steps.preflight.outputs.candidate_head_sha }}
-      validation_target: ${{ steps.preflight.outputs.validation_target }}
       promotion_artifact: ${{ steps.payload.outputs.name }}
     steps:
       - name: Check out release policy from main
@@ -195,82 +193,14 @@ jobs:
           path: locked-source
           persist-credentials: false
 
-      - name: Reverify exact bytes before publication
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/release.py \
-            --policy locked-source/release/policy.toml \
-            --release-lock promotion/candidate/release-lock.json \
-            preflight \
-            --candidate-dir promotion/candidate \
-            --k3-report promotion/k3-report.json \
-            --run-id "${{ inputs.candidate_run_id }}" >/dev/null
-
-      - name: Create draft, verify assets, then publish
+      - name: 复核候选包并发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
-          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.candidate_head_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release already exists and will not be overwritten: $RELEASE_TAG" >&2
-            exit 1
-          fi
-          python3 scripts/release_tag.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --commit "$CANDIDATE_HEAD_SHA"
-          VALIDATION_TARGET=$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          report = json.loads(Path("promotion/k3-report.json").read_text())
-          print(report.get("validation_target", "native-k3"))
-          PY
-          )
-          cat > release-notes.md <<EOF
-          Unofficial Codex build for Linux/riscv64.
-
-          This release promotes the exact candidate bytes from Actions run
-          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${{ inputs.candidate_run_id }}
-          after ${VALIDATION_TARGET} validation and release preflight checks.
-          EOF
-          gh release create "$RELEASE_TAG" \
-            promotion/candidate/* \
-            promotion/k3-report.json \
-            --draft \
-            --latest=false \
-            --verify-tag \
-            --title "$RELEASE_TAG" \
-            --notes-file release-notes.md
-          gh release view "$RELEASE_TAG" --json assets > remote-release.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          expected = {path.name for path in Path("promotion/candidate").iterdir() if path.is_file()}
-          expected.add("k3-report.json")
-          release = json.loads(Path("remote-release.json").read_text())
-          actual = {asset["name"] for asset in release["assets"]}
-          if actual != expected:
-              raise SystemExit(
-                  f"release asset mismatch; missing={sorted(expected - actual)}, "
-                  f"unexpected={sorted(actual - expected)}"
-              )
-          PY
-          python3 scripts/release.py \
+          python3 scripts/publish_release.py \
             --policy locked-source/release/policy.toml \
             --release-lock promotion/candidate/release-lock.json \
-            latest-state > latest-state.json
-          MAKE_LATEST=$(python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          state = json.loads(Path("latest-state.json").read_text())
-          print("true" if state["make_latest"] else "false")
-          PY
-          )
-          gh release edit "$RELEASE_TAG" --draft=false --latest="$MAKE_LATEST"
+            --candidate-dir promotion/candidate \
+            --k3-report promotion/k3-report.json \
+            --run-id "$CANDIDATE_RUN_ID"

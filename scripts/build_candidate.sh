@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: build_candidate.sh --source-dir DIR --v8-dir DIR --candidate-dir DIR --source-info FILE --release-lock FILE
+Usage: build_candidate.sh --source-dir DIR --v8-dir DIR --candidate-dir DIR --source-info FILE --release-lock FILE [--local-candidate-id ID]
 
 Builds and seals the stable riscv64gc-unknown-linux-musl release candidate.
 The V8 release pair must already be downloaded and attestation-verified. The
@@ -16,6 +16,7 @@ v8_dir=""
 candidate_dir=""
 source_info=""
 release_lock=""
+local_candidate_id=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-dir)
@@ -38,6 +39,10 @@ while [[ $# -gt 0 ]]; do
       release_lock="${2:?--release-lock requires a value}"
       shift 2
       ;;
+    --local-candidate-id)
+      local_candidate_id="${2:?--local-candidate-id 需要值}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -54,11 +59,26 @@ if [[ -z "$source_dir" || -z "$v8_dir" || -z "$candidate_dir" || -z "$source_inf
   usage >&2
   exit 2
 fi
-: "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
-: "${GITHUB_SHA:?GITHUB_SHA is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${CARGO_HOME:?CARGO_HOME is required}"
 : "${STRIP:?STRIP is required; run install-musl-build-tools.sh first}"
+v8_validation_args=()
+build_info_args=()
+if [[ -n "$local_candidate_id" ]]; then
+  : "${DOWNSTREAM_SOURCE_SHA:?需要下游源码提交 SHA}"
+  candidate_args=(--local-candidate-id "$local_candidate_id" --head-sha "$DOWNSTREAM_SOURCE_SHA")
+  build_info_args=(--local-candidate-id "$local_candidate_id")
+  v8_validation_args=(--local)
+  namespace_seed="$local_candidate_id:$DOWNSTREAM_SOURCE_SHA"
+else
+  : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
+  : "${GITHUB_SHA:?GITHUB_SHA is required}"
+  candidate_args=(
+    --run-id "$GITHUB_RUN_ID" --head-sha "${DOWNSTREAM_SOURCE_SHA:-$GITHUB_SHA}"
+    --workflow-head-sha "$GITHUB_SHA"
+  )
+  namespace_seed="$GITHUB_RUN_ID:$GITHUB_SHA"
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$(cd "$source_dir" && pwd)"
@@ -80,7 +100,7 @@ v8_checksums="$candidate_dir/rusty_v8_ptrcomp_sandbox_release_${target}.sha256"
 
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" validate-v8 \
   --source-dir "$source_dir" \
-  --v8-dir "$v8_dir" >/dev/null
+  --v8-dir "$v8_dir" "${v8_validation_args[@]}" >/dev/null
 cp "$v8_dir/$(basename "$v8_archive")" "$v8_archive"
 cp "$v8_dir/$(basename "$v8_binding")" "$v8_binding"
 cp "$v8_dir/$(basename "$v8_checksums")" "$v8_checksums"
@@ -155,18 +175,16 @@ cargo metadata \
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" sbom \
   --cargo-metadata "$RUNNER_TEMP/codex-cargo-metadata.json" \
   --cargo-metadata "$RUNNER_TEMP/ripgrep-cargo-metadata.json" \
-  --namespace-seed "$GITHUB_RUN_ID:$GITHUB_SHA" \
+  --namespace-seed "$namespace_seed" \
   --output "$candidate_dir/sbom.spdx.json"
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" build-info \
   --source-info "$source_info" \
   --source-dir "$source_dir" \
   --v8-build "$v8_dir/v8-build.json" \
-  --output "$candidate_dir/build-info.json"
+  --output "$candidate_dir/build-info.json" "${build_info_args[@]}"
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" finalize-candidate \
   --candidate-dir "$candidate_dir" \
   --source-info "$source_info" \
-  --run-id "$GITHUB_RUN_ID" \
-  --head-sha "${DOWNSTREAM_SOURCE_SHA:-$GITHUB_SHA}" \
-  --workflow-head-sha "$GITHUB_SHA"
+  "${candidate_args[@]}"
 python3 "$repo_root/scripts/release.py" --release-lock "$release_lock" validate-candidate \
   --candidate-dir "$candidate_dir" >/dev/null

@@ -44,6 +44,7 @@ from release_lib import (  # noqa: E402
     validate_validation_report,
     verify_latest_manifest,
     v8_artifact_names,
+    v8_bazel_runner,
     v8_input_descriptor,
     v8_input_digest,
     v8_release_tag,
@@ -124,8 +125,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("release-lock.json", v8)
         candidate_script = (ROOT / "scripts/build_candidate.sh").read_text()
         v8_script = (ROOT / "scripts/build_v8.sh").read_text()
-        self.assertNotIn("run_bazel_with_buildbuddy.py", candidate_script)
-        self.assertIn("run_bazel_with_buildbuddy.py", v8_script)
+        self.assertNotIn("v8_bazel_runner", candidate_script)
+        self.assertIn("v8_bazel_runner", v8_script)
         self.assertIn("validate-v8", candidate_script)
 
     def test_documentation_push_is_filtered_but_pull_requests_are_not(self) -> None:
@@ -391,6 +392,7 @@ class CandidateTests(unittest.TestCase):
                 "downstream_commit_sha": "1" * 40,
                 "policy_sha256": self.manifest.policy_sha256,
                 "release_lock_sha256": self.manifest.release_lock_sha256,
+                "patch_series_sha256": patch_series_digest(self.manifest.patches_dir),
             },
         )
         self.now = dt.datetime(2026, 8, 9, 8, 0, tzinfo=dt.timezone.utc)
@@ -433,6 +435,62 @@ class CandidateTests(unittest.TestCase):
         write_json(self.candidate_dir / "candidate.json", self.candidate)
         with self.assertRaisesRegex(ReleaseError, "workflow head SHA is invalid"):
             validate_candidate(self.manifest, self.candidate_dir)
+
+    def test_local_candidate_and_report_preflight(self) -> None:
+        for name in ("candidate.json", "release.json", "SHA256SUMS"):
+            (self.candidate_dir / name).unlink()
+        self.candidate = finalize_candidate(
+            self.manifest,
+            self.candidate_dir,
+            local_candidate_id="a" * 32,
+            head_sha="2" * 40,
+            source_info_path=self.source_info,
+            created_at=self.now,
+        )
+        self.assertEqual(self.candidate["build_origin"], "local")
+        self.assertNotIn("candidate_run_id", self.candidate)
+        self.assertNotIn("candidate_workflow_head_sha", self.candidate)
+        report_path = self.targeted_report()
+        report = json.loads(report_path.read_text())
+        del report["candidate_run_id"]
+        report.update(build_origin="local", candidate_id="a" * 32)
+        write_json(report_path, report)
+        self.assertEqual(
+            preflight_publish(
+                self.manifest, self.candidate_dir, report_path, now=self.now
+            ),
+            (self.candidate, report),
+        )
+        with self.assertRaisesRegex(ReleaseError, "origin must be github-actions"):
+            preflight_publish(
+                self.manifest,
+                self.candidate_dir,
+                report_path,
+                expected_run_id="12345",
+                now=self.now,
+            )
+        for field, value, message in (
+            ("candidate_id", "b" * 32, "local ID does not match"),
+            ("candidate_run_id", "12345", "cannot have Actions run metadata"),
+            ("assets", {}, "every candidate asset"),
+        ):
+            with self.subTest(field=field):
+                write_json(report_path, {**report, field: value})
+                with self.assertRaisesRegex(ReleaseError, message):
+                    preflight_publish(
+                        self.manifest, self.candidate_dir, report_path, now=self.now
+                    )
+
+        self.candidate["candidate_run_id"] = "12345"
+        write_json(self.candidate_dir / "candidate.json", self.candidate)
+        with self.assertRaisesRegex(ReleaseError, "cannot have Actions run metadata"):
+            validate_candidate(self.manifest, self.candidate_dir)
+
+    def test_actions_candidate_cannot_use_local_preflight(self) -> None:
+        with self.assertRaisesRegex(ReleaseError, "origin must be local"):
+            preflight_publish(
+                self.manifest, self.candidate_dir, self.targeted_report(), now=self.now
+            )
 
     def passing_report(self) -> Path:
         path = self.root / "k3-report.json"
@@ -735,6 +793,26 @@ class ReleaseStateTests(unittest.TestCase):
             },
         )
 
+    def test_complete_local_release_is_a_hit(self) -> None:
+        asset_bytes = dict(self.asset_bytes)
+        candidate = json.loads(asset_bytes["candidate.json"])
+        del candidate["candidate_run_id"]
+        del candidate["candidate_workflow_head_sha"]
+        candidate.update(build_origin="local", candidate_id="a" * 32)
+        asset_bytes["candidate.json"] = json.dumps(candidate).encode()
+        self.assertTrue(self.run_check(asset_bytes=asset_bytes)["exists"])
+
+    def test_api_asset_digest_mismatch_fails(self) -> None:
+        release = self.fake_release()
+        asset = next(
+            asset for asset in release["assets"] if asset["name"] == "k3-report.json"
+        )
+        asset["digest"] = f"sha256:{'0' * 64}"
+        with self.assertRaisesRegex(
+            ReleaseError, "release asset digest mismatch: k3-report.json"
+        ):
+            self.run_check(release)
+
     def test_draft_or_prerelease_is_not_a_hit(self) -> None:
         with self.assertRaisesRegex(ReleaseError, "draft or prerelease"):
             self.run_check(self.fake_release(draft=True))
@@ -937,6 +1015,48 @@ class V8ArtifactTests(unittest.TestCase):
             validate_v8_artifact(self.manifest, self.source, self.v8_dir),
             self.metadata,
         )
+
+    def test_v8_identity_tracks_the_upstream_bazel_launcher(self) -> None:
+        old = ".github/scripts/run_bazel_with_buildbuddy.py"
+        new = ".github/scripts/run_bazel.py"
+        self.assertEqual(v8_bazel_runner(self.source), old)
+        (self.source / old).rename(self.source / new)
+        self.assertEqual(v8_bazel_runner(self.source), new)
+        descriptor = v8_input_descriptor(self.manifest, self.source)
+        self.assertIn(new, descriptor["files"])
+        self.assertNotIn(old, descriptor["files"])
+        self.assertNotEqual(v8_input_digest(descriptor), self.metadata["input_sha256"])
+        (self.source / new).unlink()
+        with self.assertRaisesRegex(ReleaseError, "Bazel launcher is missing"):
+            v8_input_descriptor(self.manifest, self.source)
+
+    def test_local_v8_has_an_independent_identity(self) -> None:
+        build_path = self.v8_dir / v8_artifact_names(self.manifest)[3]
+        build_path.unlink()
+        metadata = finalize_v8_artifact(
+            self.manifest,
+            self.source,
+            self.v8_dir,
+            head_sha="3" * 40,
+            source_kind="local",
+        )
+        self.assertEqual(metadata["input"]["runner_image"], "local")
+        self.assertEqual(metadata["builder"]["source_kind"], "local")
+        self.assertNotIn("run_id", metadata["builder"])
+        self.assertNotIn("workflow", metadata["builder"])
+        self.assertNotEqual(metadata["release_tag"], self.metadata["release_tag"])
+        with self.assertRaisesRegex(ReleaseError, "local V8 artifacts"):
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir)
+        self.assertEqual(
+            validate_v8_artifact(
+                self.manifest, self.source, self.v8_dir, allow_local=True
+            ),
+            metadata,
+        )
+        metadata["builder"]["run_id"] = "12345"
+        write_json(build_path, metadata)
+        with self.assertRaisesRegex(ReleaseError, "cannot have Actions run metadata"):
+            validate_v8_artifact(self.manifest, self.source, self.v8_dir, allow_local=True)
 
     def test_git_v8_identity_tracks_pinned_commit(self) -> None:
         lock = self.source / "codex-rs" / "Cargo.lock"

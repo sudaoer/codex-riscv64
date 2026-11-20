@@ -52,31 +52,20 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertIn("--release-lock promotion/candidate/release-lock.json", self.publish)
         self.assertIn("--k3-report promotion/k3-report.json", self.publish)
 
-    def test_existing_releases_are_never_replaced_by_the_workflow(self) -> None:
-        refusal = self.publish.index("Release already exists and will not be overwritten")
-        creation = self.publish.index("gh release create")
-        self.assertLess(refusal, creation)
-        self.assertLess(self.publish.index("scripts/release_tag.py"), creation)
-        self.assertIn('--commit "$CANDIDATE_HEAD_SHA"', self.publish)
-        self.assertIn("--verify-tag", self.publish)
-        self.assertNotIn("--target", self.publish)
-        self.assertNotIn("gh release delete", self.workflow)
-        self.assertNotIn("--clobber", self.workflow)
-        self.assertIn("--draft", self.publish)
-        latest_state = self.publish.index("latest-state > latest-state.json")
-        publish = self.publish.index('gh release edit "$RELEASE_TAG"')
-        self.assertLess(self.publish.index("release asset mismatch"), latest_state)
-        self.assertLess(latest_state, publish)
-        self.assertIn('state["make_latest"]', self.publish)
-        self.assertIn('--latest="$MAKE_LATEST"', self.publish)
-        self.assertNotIn('--draft=false --latest\n', self.publish)
+    def test_workflow_promotes_the_verified_payload_with_the_shared_publisher(self) -> None:
+        publisher = self.publish.index("python3 scripts/publish_release.py")
+        self.assertLess(self.publish.index("Download verified promotion payload"), publisher)
+        self.assertLess(self.publish.index("path: locked-source"), publisher)
+        self.assertIn("CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}", self.publish)
+        self.assertIn('--run-id "$CANDIDATE_RUN_ID"', self.publish)
+        self.assertNotIn("gh release", self.workflow)
 
     def test_locked_policy_is_used_without_replacing_workflow_scripts(self) -> None:
         self.assertIn("ref: ${{ steps.source.outputs.sha }}", self.preflight)
         self.assertIn("ref: ${{ needs.preflight.outputs.candidate_head_sha }}", self.publish)
         self.assertEqual(self.workflow.count("path: locked-source"), 2)
         self.assertEqual(
-            self.workflow.count("--policy locked-source/release/policy.toml"), 4,
+            self.workflow.count("--policy locked-source/release/policy.toml"), 3,
         )
         source = self.preflight.index("Resolve locked candidate source revision")
         checkout = self.preflight.index("Check out locked candidate release policy")

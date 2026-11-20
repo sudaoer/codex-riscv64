@@ -4,18 +4,31 @@ Date: Sat, 8 Aug 2026 23:18:51 +0800
 Subject: [PATCH 2/4] feat: add riscv64 Linux release and sandbox support
 
 ---
- .github/scripts/install-musl-build-tools.sh | 87 ++++++++++++++++++++++-------
+ .github/scripts/install-musl-build-tools.sh | 93 ++++++++++++++++++++++--------
  .github/scripts/install-musl-openssl.sh     |  1 +
  codex-rs/bwrap/build.rs                     | 11 +++-
  codex-rs/core/Cargo.toml                    |  4 ++
  codex-rs/linux-sandbox/src/seccomp.rs       |  2 +
- 5 files changed, 84 insertions(+), 21 deletions(-)
+ 5 files changed, 88 insertions(+), 23 deletions(-)
 
 diff --git a/.github/scripts/install-musl-build-tools.sh b/.github/scripts/install-musl-build-tools.sh
 index a7d37b7ff9..5cd37e3174 100644
 --- a/.github/scripts/install-musl-build-tools.sh
 +++ b/.github/scripts/install-musl-build-tools.sh
-@@ -26,12 +26,32 @@ case "${TARGET}" in
+@@ -16,8 +16,10 @@ if [[ -n "${APT_INSTALL_ARGS:-}" ]]; then
+   apt_install_args=(${APT_INSTALL_ARGS})
+ fi
+
+-sudo apt-get update "${apt_update_args[@]}"
+-sudo apt-get install -y "${apt_install_args[@]}" ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils perl make
++if [[ "${CODEX_MUSL_SKIP_HOST_PACKAGES:-0}" != "1" ]]; then
++  sudo apt-get update "${apt_update_args[@]}"
++  sudo apt-get install -y "${apt_install_args[@]}" ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils perl make
++fi
+
+ case "${TARGET}" in
+   x86_64-unknown-linux-musl)
+@@ -26,12 +28,32 @@ case "${TARGET}" in
    aarch64-unknown-linux-musl)
      arch="aarch64"
      ;;
@@ -48,7 +61,7 @@ index a7d37b7ff9..5cd37e3174 100644
  libcap_version="2.75"
  libcap_sha256="de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632"
  libcap_tarball_name="libcap-${libcap_version}.tar.xz"
-@@ -40,8 +60,17 @@ libcap_download_url="https://mirrors.edge.kernel.org/pub/linux/libs/security/lin
+@@ -40,8 +62,17 @@ libcap_download_url="https://mirrors.edge.kernel.org/pub/linux/libs/security/lin
  # Use the musl toolchain as the Rust linker to avoid Zig injecting its own CRT.
  if command -v "${arch}-linux-musl-gcc" >/dev/null; then
    musl_linker="$(command -v "${arch}-linux-musl-gcc")"
@@ -67,7 +80,7 @@ index a7d37b7ff9..5cd37e3174 100644
  else
    echo "musl gcc not found after install; arch=${arch}" >&2
    exit 1
-@@ -49,11 +78,6 @@ fi
+@@ -49,11 +80,6 @@ fi
 
  OPENSSL_CC="${musl_linker}" bash "$(dirname "${BASH_SOURCE[0]}")/install-musl-openssl.sh"
  
@@ -79,7 +92,7 @@ index a7d37b7ff9..5cd37e3174 100644
  libcap_root="${tool_root}/libcap-${libcap_version}"
  libcap_src_root="${libcap_root}/src"
  libcap_prefix="${libcap_root}/prefix"
-@@ -68,10 +92,14 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
+@@ -68,10 +94,14 @@ if [[ ! -f "${libcap_prefix}/lib/libcap.a" ]]; then
  
    tar -xJf "${libcap_tarball}" -C "${libcap_src_root}"
    libcap_source_dir="${libcap_src_root}/libcap-${libcap_version}"
@@ -96,7 +109,7 @@ index a7d37b7ff9..5cd37e3174 100644
  
    cp "${libcap_source_dir}/libcap/libcap.a" "${libcap_prefix}/lib/libcap.a"
    cp "${libcap_source_dir}/libcap/include/uapi/linux/capability.h" "${libcap_prefix}/include/linux/capability.h"
-@@ -231,7 +259,9 @@ else
+@@ -231,7 +261,9 @@ else
  fi
  
  if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
@@ -107,7 +120,7 @@ index a7d37b7ff9..5cd37e3174 100644
    boring_sysroot_var="BORING_BSSL_SYSROOT_${TARGET}"
    boring_sysroot_var="${boring_sysroot_var//-/_}"
    echo "${boring_sysroot_var}=${sysroot}" >> "$GITHUB_ENV"
-@@ -245,16 +275,28 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
+@@ -245,16 +277,28 @@ if [[ "${TARGET}" == "aarch64-unknown-linux-musl" ]]; then
    cxxflags="${cxxflags} -Wno-error=frame-larger-than"
  fi
  
@@ -142,7 +155,7 @@ index a7d37b7ff9..5cd37e3174 100644
 +target_cxxflags_var="${target_cxxflags_var//-/_}"
 +echo "${target_cxxflags_var}=${cxxflags}" >> "$GITHUB_ENV"
 
-@@ -261,18 +303,23 @@
+@@ -261,18 +305,23 @@
  cargo_linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
  cargo_linker_var="${cargo_linker_var//-/_}"
  echo "${cargo_linker_var}=${musl_linker}" >> "$GITHUB_ENV"
@@ -169,7 +182,7 @@ index a7d37b7ff9..5cd37e3174 100644
  pkg_config_path_var="PKG_CONFIG_PATH_${TARGET}"
  pkg_config_path_var="${pkg_config_path_var//-/_}"
  echo "${pkg_config_path_var}=${libcap_pkgconfig_dir}" >> "$GITHUB_ENV"
-@@ -283,7 +330,9 @@ pkg_config_libdir_var="${pkg_config_libdir_var//-/_}"
+@@ -283,7 +332,9 @@ pkg_config_libdir_var="${pkg_config_libdir_var//-/_}"
  echo "${pkg_config_libdir_var}=${libcap_pkgconfig_dir}" >> "$GITHUB_ENV"
  
  if [[ -n "${sysroot}" && "${sysroot}" != "/" ]]; then
