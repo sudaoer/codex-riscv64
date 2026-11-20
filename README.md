@@ -183,9 +183,43 @@ Each version is validated and published independently. Publish compares the upst
 version and downstream revision before updating latest, so an older version finishing
 later cannot downgrade latest.
 
+## 本地构建与发布
+
+稳定版可在本机构建并直接发布到 GitHub Release，也可由上游 watcher 启动 GitHub Actions
+完成构建和发布。两条路径都发布 `riscv-vX.Y.Z-rN` 标签和同一组 18 个资产，使用同一个安装器。
+
+本地发布时，检出准备发布的下游提交，保持工作树干净，并将该提交推送到本仓库。使用具备
+仓库写权限的账号登录 `gh`。按上游版本的 `codex-rs/rust-toolchain.toml` 安装 Rust 和
+`riscv64gc-unknown-linux-musl` 目标。Bazel 版本取自上游 `.bazelversion`，Zig 版本取自
+`release/policy.toml`。本地构建复用用户的 Cargo 和 Bazel 缓存。
+
+Ubuntu 主机使用以下编译依赖。QEMU 工具和固件见下文。
+
+```sh
+sudo apt-get install binutils llvm pkg-config libcap-dev zstd ca-certificates \
+  curl musl-tools g++ clang libc++-dev libc++abi-dev lld xz-utils perl make \
+  cmake ninja-build
+```
+
+将 `X.Y.Z` 换成要构建的上游稳定版本，然后依次构建、验证和发布。
+
+```sh
+version=X.Y.Z
+work_dir=".work/local/$version"
+python3 scripts/release.py local-build --version "$version" --work-dir "$work_dir"
+python3 scripts/validate.py --candidate-dir "$work_dir/candidate" --target qemu \
+  --output "$work_dir/k3-report.json"
+python3 scripts/release.py publish-local --candidate-dir "$work_dir/candidate" \
+  --report "$work_dir/k3-report.json"
+```
+
+本地候选包记录源码提交和独立候选 ID。发布预检核验来源、候选资产以及绑定到这些资产的九项
+验证结果。两条路径均先上传草稿，逐项核对远端资产的大小和 SHA-256，再公开 Release。
+上传中断后，使用相同的候选包和报告重试可补传缺失资产。
+
 ## 维护者验证 / Maintainer validation
 
-每次实际生成 Candidate 后，Actions 会自动启动独立的 QEMU 验证工作流；9 项检查和
+Actions 生成 Candidate 后会自动启动独立的 QEMU 验证工作流。9 项检查和
 验证预检通过后，自动启动 Publish。Publish 会核对成功的 QEMU run/attempt、下载其报告，
 并按固定的 release lock 再次检查 Candidate、构建 attestation 和验证报告，再通过
 `release` 环境发布。上游发布新版不影响已锁定版本的验证和发布。
@@ -206,9 +240,11 @@ python3 scripts/k3_validate.py --run-id RUN_ID
 python3 scripts/validate.py --target qemu --run-id RUN_ID
 ```
 
-`--run-id` 是必需的 Candidate run ID；`--target` 可选且默认为 `k3`，`--policy` 默认为
-`release/policy.toml`，`--output` 可指定报告路径。`--skip-attestation` 仅跳过本地验证中的
-attestation 检查，`--request-publish` 请求发布工作流；Publish 始终独立检查 attestation。
+验证 Actions 候选包时，`--run-id` 接收 Candidate run ID。验证本地候选包时，
+`--candidate-dir` 接收候选目录。`--target` 默认为 `k3`，`--policy` 默认为
+`release/policy.toml`，`--output` 可指定报告路径。手动验证 Actions 候选包时，
+`--skip-attestation` 跳过当前验证的 attestation 检查，`--request-publish` 请求发布工作流。
+Publish 始终独立检查 Actions 候选包的构建 attestation。
 
 QEMU 验证使用 Ubuntu 26.04 主机的 QEMU 10.2 和 UEFI 固件组合，Actions 验证 job 也使用
 `ubuntu-26.04`。Ubuntu 24.04 自带的 QEMU 8.2/UEFI 在加载当前固定镜像的内核后停止推进。
@@ -242,20 +278,19 @@ QEMU 参数；`--ssh-host`（默认 `k3`）用于旧的原生入口。未指定 
 
 验证报告的正式发布资产名称仍为 `k3-report.json`；发布预检同时接受旧的 `--k3-report` 和
 `--report` 参数。自动发布使用 `candidate_run_id`、`validation_run_id` 和
-`validation_run_attempt` 定位成功验证的报告；有仓库写权限的人工维护者仍可使用
-`k3_report_b64` 提交本地报告。这两种报告来源互斥，自动 bot 不能使用手工报告入口。
+`validation_run_attempt` 定位成功验证的报告。有仓库写权限的维护者也可使用
+`k3_report_b64` 为 Actions 候选包提交手动验证报告。这两种报告输入互斥。
 历史报告如果没有 `validation_target` 会按 `native-k3` 兼容处理；新报告会明确写入
 `native-k3` 或 `qemu-system-riscv64`，发布说明也会显示实际目标。`--request-publish`
 使用维护者的本地报告入口；Publish 预检通过后自动发布。
 
-Publish 在创建 Release 前先核验或创建指向 Candidate 提交的标签，再使用 `--verify-tag`
-发布。若构建期间 main 的 workflow 文件发生变化，[GitHub API 的权限规则](https://docs.github.com/en/rest/releases/releases#create-a-release)
-可能拒绝 `GITHUB_TOKEN` 为旧提交
-创建标签；维护者可使用 `scripts/release_tag.py` 为已验证的 Candidate 建立准确标签后重跑
-Publish。既有标签指向不同提交时会直接失败。
+两条路径都在创建 Release 前核验或创建指向候选包源码提交的标签。既有标签指向不同提交时会
+直接失败。如果构建期间 `main` 的工作流文件发生变化，`GITHUB_TOKEN` 为旧提交创建标签的
+请求可能失败。维护者可用 `scripts/release_tag.py` 为已验证的 Actions 候选包建立准确标签，
+然后重跑 Publish。[GitHub API 的权限规则](https://docs.github.com/en/rest/releases/releases#create-a-release)
 
-Whenever a new Candidate is produced, Actions automatically starts a separate QEMU
-validation workflow. After all nine checks and validation preflight pass, it starts
+Actions automatically starts a separate QEMU validation workflow. After all nine
+checks and validation preflight pass, it starts
 Publish. Publish verifies the successful QEMU run and attempt, retrieves its report,
 and independently checks the Candidate, build attestation, and validation report
 against the immutable release lock before publishing through the `release` environment.
@@ -280,7 +315,7 @@ python3 scripts/k3_validate.py --run-id RUN_ID
 python3 scripts/validate.py --target qemu --run-id RUN_ID
 ```
 
-`--run-id` is the required Candidate run ID. `--target` is optional and defaults to
+`--run-id` is the Candidate run ID. `--target` is optional and defaults to
 `k3`; `--policy` defaults to `release/policy.toml`; and `--output` selects the report
 path. `--skip-attestation` skips only the local attestation check, while
 `--request-publish` requests the publication workflow. Publish always verifies the
@@ -334,7 +369,7 @@ notes display the actual target. `--request-publish` uses the maintainer's local
 report path; publication proceeds automatically after Publish preflight succeeds.
 
 Before creating a Release, Publish verifies or creates its tag at the Candidate
-commit, then publishes with `--verify-tag`. If workflow files on main change during
+commit. If workflow files on main change during
 the build, [GitHub's API permission rules](https://docs.github.com/en/rest/releases/releases#create-a-release)
 may reject tag creation at the older commit using `GITHUB_TOKEN`.
 A maintainer can use `scripts/release_tag.py` to establish the exact tag for the

@@ -10,6 +10,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+from local_build import local_build, local_head
 from release_lib import (
     ReleaseError,
     build_spdx_document,
@@ -27,17 +28,17 @@ from release_lib import (
     read_json_object,
     resolve_latest_manifest,
     should_make_latest,
+    v8_artifact_names,
+    v8_bazel_runner,
+    v8_input_descriptor,
+    v8_input_digest,
+    v8_release_tag,
     validate_candidate,
     validate_candidate_run,
     validate_v8_artifact,
     verify_latest_manifest,
-    v8_artifact_names,
-    v8_input_descriptor,
-    v8_input_digest,
-    v8_release_tag,
     write_json,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY = ROOT / "release" / "policy.toml"
@@ -53,6 +54,15 @@ def parser() -> argparse.ArgumentParser:
 
     commands.add_parser("validate-policy", help="validate the version-free policy")
     commands.add_parser("validate", help="validate the policy and release lock")
+
+    build_local = commands.add_parser("local-build", help="在本机生成发布候选包")
+    build_local.add_argument("--version", required=True)
+    build_local.add_argument("--work-dir", type=Path, required=True)
+    publish_local = commands.add_parser(
+        "publish-local", help="直接发布已验证的本地候选包"
+    )
+    publish_local.add_argument("--candidate-dir", type=Path, required=True)
+    publish_local.add_argument("--report", type=Path, required=True)
 
     release_state = commands.add_parser(
         "release-state", help="check and verify the formal downstream release"
@@ -73,9 +83,7 @@ def parser() -> argparse.ArgumentParser:
     decide_build.add_argument(
         "--force-rebuild", choices=("true", "false"), required=True
     )
-    decide_build.add_argument(
-        "--release-hit", choices=("true", "false"), required=True
-    )
+    decide_build.add_argument("--release-hit", choices=("true", "false"), required=True)
 
     prepare = commands.add_parser("prepare", help="reconstruct patched upstream source")
     prepare.add_argument("--source-dir", type=Path, required=True)
@@ -95,22 +103,24 @@ def parser() -> argparse.ArgumentParser:
     build_info.add_argument("--output", type=Path, required=True)
     build_info.add_argument("--source-dir", type=Path, required=True)
     build_info.add_argument("--v8-build", type=Path, required=True)
+    build_info.add_argument("--local-candidate-id")
 
     v8_key = commands.add_parser(
         "v8-key", help="derive the immutable V8 release identity"
     )
     v8_key.add_argument("--source-dir", type=Path, required=True)
+    v8_key.add_argument("--local", action="store_true")
 
     finalize_v8 = commands.add_parser(
         "finalize-v8", help="seal an independently built V8 release pair"
     )
     finalize_v8.add_argument("--source-dir", type=Path, required=True)
     finalize_v8.add_argument("--v8-dir", type=Path, required=True)
-    finalize_v8.add_argument("--run-id", required=True)
+    finalize_v8.add_argument("--run-id")
     finalize_v8.add_argument("--head-sha", required=True)
     finalize_v8.add_argument("--workflow-head-sha")
     finalize_v8.add_argument(
-        "--source-kind", choices=("build", "bootstrap"), required=True
+        "--source-kind", choices=("build", "bootstrap", "local"), required=True
     )
     finalize_v8.add_argument("--bootstrap-candidate-run-id")
 
@@ -119,18 +129,19 @@ def parser() -> argparse.ArgumentParser:
     )
     validate_v8.add_argument("--source-dir", type=Path, required=True)
     validate_v8.add_argument("--v8-dir", type=Path, required=True)
+    validate_v8.add_argument("--local", action="store_true")
 
     sbom = commands.add_parser("sbom", help="convert Cargo metadata to SPDX 2.3")
-    sbom.add_argument(
-        "--cargo-metadata", type=Path, action="append", required=True
-    )
+    sbom.add_argument("--cargo-metadata", type=Path, action="append", required=True)
     sbom.add_argument("--output", type=Path, required=True)
     sbom.add_argument("--namespace-seed", required=True)
 
     finalize = commands.add_parser("finalize-candidate", help="seal candidate metadata")
     finalize.add_argument("--candidate-dir", type=Path, required=True)
     finalize.add_argument("--source-info", type=Path, required=True)
-    finalize.add_argument("--run-id", required=True)
+    build_identity = finalize.add_mutually_exclusive_group(required=True)
+    build_identity.add_argument("--run-id")
+    build_identity.add_argument("--local-candidate-id")
     finalize.add_argument("--head-sha", required=True)
     finalize.add_argument("--workflow-head-sha")
 
@@ -149,7 +160,9 @@ def parser() -> argparse.ArgumentParser:
         required=True,
         help="validation report (formal asset name: k3-report.json)",
     )
-    preflight.add_argument("--run-id", required=True)
+    report_identity = preflight.add_mutually_exclusive_group(required=True)
+    report_identity.add_argument("--run-id")
+    report_identity.add_argument("--local", action="store_true")
 
     validate_run = commands.add_parser(
         "validate-run", help="verify a selected Candidate build run"
@@ -175,6 +188,8 @@ def write_build_info(
     source_dir: Path,
     v8_build_path: Path,
     output: Path,
+    *,
+    local_candidate_id: str | None = None,
 ) -> None:
     manifest = load_manifest(policy_path, release_lock_path)
     source_info = read_json_object(source_info_path)
@@ -193,7 +208,12 @@ def write_build_info(
             f"resolved V8 {resolved_v8} does not match manifest "
             f"{manifest.toolchain.rusty_v8}"
         )
-    v8_build = validate_v8_artifact(manifest, source_dir, v8_build_path.parent)
+    v8_build = validate_v8_artifact(
+        manifest,
+        source_dir,
+        v8_build_path.parent,
+        allow_local=local_candidate_id is not None,
+    )
     if v8_build_path.name != "v8-build.json":
         raise ReleaseError("V8 build metadata must be named v8-build.json")
     v8_input = v8_build["input"]
@@ -223,19 +243,48 @@ def write_build_info(
         },
         "patch_series_sha256": patch_series_digest(manifest.patches_dir),
         "source": source_info,
-        "github": {
+    }
+    if local_candidate_id is None:
+        build["github"] = {
             "repository": os.environ.get("GITHUB_REPOSITORY"),
             "run_id": os.environ.get("GITHUB_RUN_ID"),
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "sha": os.environ.get("GITHUB_SHA"),
-        },
-    }
+        }
+    else:
+        build.update(
+            build_origin="local",
+            candidate_id=local_candidate_id,
+            candidate_head_sha=local_head(ROOT),
+        )
     write_json(output, build)
 
 
 def main() -> int:
     args = parser().parse_args()
     policy_document = load_policy(args.policy)
+    if args.command == "local-build":
+        candidate = local_build(ROOT, policy_document, args.version, args.work_dir)
+        print(json.dumps(candidate, indent=2, sort_keys=True))
+        return 0
+    if args.command == "publish-local":
+        from publish_release import publish_release
+
+        if policy_document.path.resolve() != DEFAULT_POLICY:
+            raise ReleaseError("本地发布使用所提交的 release/policy.toml")
+        manifest = load_manifest(args.policy, args.candidate_dir / "release-lock.json")
+        candidate, report = preflight_publish(manifest, args.candidate_dir, args.report)
+        if local_head(ROOT) != candidate["candidate_head_sha"]:
+            raise ReleaseError("请从构建此候选包的下游提交发布")
+        result = publish_release(
+            manifest,
+            args.candidate_dir,
+            args.report,
+            candidate=candidate,
+            report=report,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     if args.command == "validate-policy":
         values = {
             "target": policy_document.distribution.target,
@@ -355,21 +404,26 @@ def main() -> int:
             args.source_dir,
             args.v8_build,
             args.output,
+            local_candidate_id=args.local_candidate_id,
         )
     elif args.command == "v8-key":
-        descriptor = v8_input_descriptor(manifest, args.source_dir)
+        descriptor = v8_input_descriptor(manifest, args.source_dir, local=args.local)
         digest = v8_input_digest(descriptor)
         archive, binding, checksums, build = v8_artifact_names(manifest)
         values = {
-            "v8_release_tag": v8_release_tag(manifest, args.source_dir),
+            "v8_release_tag": v8_release_tag(
+                manifest, args.source_dir, local=args.local
+            ),
             "v8_input_sha256": digest,
             "rusty_v8": manifest.toolchain.rusty_v8,
             "v8_archive": archive,
             "v8_binding": binding,
             "v8_checksums": checksums,
             "v8_build": build,
-            "bazelisk": descriptor["bazelisk"],
+            "bazel_runner": v8_bazel_runner(args.source_dir),
         }
+        if not args.local:
+            values["bazelisk"] = descriptor["bazelisk"]
         github_output(values)
         print(json.dumps({**values, "input": descriptor}, indent=2, sort_keys=True))
     elif args.command == "finalize-v8":
@@ -385,7 +439,9 @@ def main() -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "validate-v8":
-        result = validate_v8_artifact(manifest, args.source_dir, args.v8_dir)
+        result = validate_v8_artifact(
+            manifest, args.source_dir, args.v8_dir, allow_local=args.local
+        )
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "sbom":
         cargo_metadata = [read_json_object(path) for path in args.cargo_metadata]
@@ -403,6 +459,7 @@ def main() -> int:
             head_sha=args.head_sha,
             source_info_path=args.source_info,
             workflow_head_sha=args.workflow_head_sha,
+            local_candidate_id=args.local_candidate_id,
         )
         print(json.dumps(candidate, indent=2, sort_keys=True))
     elif args.command == "validate-candidate":
@@ -431,7 +488,9 @@ def main() -> int:
         )
     elif args.command == "validate-run":
         run = read_json_object(args.run_json)
-        candidate = validate_candidate(manifest, args.candidate_dir)
+        candidate = validate_candidate(
+            manifest, args.candidate_dir, expected_origin="github-actions"
+        )
         validate_candidate_run(
             run,
             expected_run_id=args.run_id,

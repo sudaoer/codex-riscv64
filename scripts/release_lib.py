@@ -23,6 +23,7 @@ VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 TAG_RE = re.compile(r"^rust-v([0-9]+\.[0-9]+\.[0-9]+)$")
 RELEASE_TAG_RE = re.compile(r"^riscv-v([0-9]+)\.([0-9]+)\.([0-9]+)-r([0-9]+)$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+LOCAL_CANDIDATE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 TARGET = "riscv64gc-unknown-linux-musl"
 SCHEMA_VERSION = 1
 CANDIDATE_WORKFLOW_PATH = ".github/workflows/candidate-build.yml"
@@ -40,7 +41,6 @@ V8_INPUT_FILES = (
     "BUILD.bazel",
     "MODULE.bazel",
     "MODULE.bazel.lock",
-    ".github/scripts/run_bazel_with_buildbuddy.py",
     ".github/scripts/rusty_v8_bazel.py",
     ".github/scripts/rusty_v8_module_bazel.py",
 )
@@ -1036,11 +1036,25 @@ def _v8_lock_record(manifest: Manifest, source_dir: Path) -> dict[str, str]:
     return {"version": version, "source": source, "checksum": checksum}
 
 
-def v8_input_descriptor(manifest: Manifest, source_dir: Path) -> dict[str, Any]:
+def v8_bazel_runner(source_dir: Path) -> str:
+    for name in ("run_bazel.py", "run_bazel_with_buildbuddy.py"):
+        relative = f".github/scripts/{name}"
+        path = source_dir / relative
+        if path.exists() or path.is_symlink():
+            if not path.is_file() or path.is_symlink():
+                raise ReleaseError(f"V8 input must be a regular file: {relative}")
+            return relative
+    raise ReleaseError("V8 Bazel launcher is missing from source")
+
+
+def v8_input_descriptor(
+    manifest: Manifest, source_dir: Path, *, local: bool = False
+) -> dict[str, Any]:
     source_dir = source_dir.resolve()
     if not source_dir.is_dir():
         raise ReleaseError(f"V8 source directory does not exist: {source_dir}")
-    input_paths = [source_dir / name for name in V8_INPUT_FILES]
+    input_names = (*V8_INPUT_FILES, v8_bazel_runner(source_dir))
+    input_paths = [source_dir / name for name in input_names]
     for directory_name in V8_INPUT_DIRECTORIES:
         directory = source_dir / directory_name
         if not directory.is_dir() or directory.is_symlink():
@@ -1055,7 +1069,7 @@ def v8_input_descriptor(manifest: Manifest, source_dir: Path) -> dict[str, Any]:
         if path.is_symlink() or not path.is_file():
             raise ReleaseError(f"V8 input must be a regular file: {relative}")
         files[relative] = asset_record(path)
-    missing = [name for name in V8_INPUT_FILES if name not in files]
+    missing = [name for name in input_names if name not in files]
     if missing:
         raise ReleaseError(f"required V8 inputs are missing: {missing}")
 
@@ -1071,8 +1085,8 @@ def v8_input_descriptor(manifest: Manifest, source_dir: Path) -> dict[str, Any]:
         "compilation_mode": V8_COMPILATION_MODE,
         "bazel_configs": list(V8_BAZEL_CONFIGS),
         "bazel": bazel_version,
-        "bazelisk": V8_BAZELISK_VERSION,
-        "runner_image": V8_RUNNER_IMAGE,
+        "bazelisk": None if local else V8_BAZELISK_VERSION,
+        "runner_image": "local" if local else V8_RUNNER_IMAGE,
         "v8_crate": _v8_lock_record(manifest, source_dir),
         "files": files,
     }
@@ -1085,8 +1099,10 @@ def v8_input_digest(descriptor: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def v8_release_tag(manifest: Manifest, source_dir: Path) -> str:
-    digest = v8_input_digest(v8_input_descriptor(manifest, source_dir))
+def v8_release_tag(
+    manifest: Manifest, source_dir: Path, *, local: bool = False
+) -> str:
+    digest = v8_input_digest(v8_input_descriptor(manifest, source_dir, local=local))
     return f"rusty-v8-riscv64-v{manifest.toolchain.rusty_v8}-{digest[:12]}"
 
 
@@ -1095,23 +1111,28 @@ def finalize_v8_artifact(
     source_dir: Path,
     v8_dir: Path,
     *,
-    run_id: str,
+    run_id: str | None = None,
     head_sha: str,
     source_kind: str,
     workflow_head_sha: str | None = None,
     bootstrap_candidate_run_id: str | None = None,
     created_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    if not run_id.isdigit():
-        raise ReleaseError("V8 run ID must be numeric")
     if SHA_RE.fullmatch(head_sha) is None:
         raise ReleaseError("V8 head SHA is invalid")
-    if workflow_head_sha is None:
-        workflow_head_sha = head_sha
-    if SHA_RE.fullmatch(workflow_head_sha) is None:
-        raise ReleaseError("V8 workflow head SHA is invalid")
-    if source_kind not in {"build", "bootstrap"}:
-        raise ReleaseError("V8 source kind must be build or bootstrap")
+    if source_kind not in ("build", "bootstrap", "local"):
+        raise ReleaseError("V8 source kind must be build, bootstrap, or local")
+    local = source_kind == "local"
+    if local:
+        if run_id is not None or workflow_head_sha is not None:
+            raise ReleaseError("local V8 builder cannot have Actions run metadata")
+    else:
+        if run_id is None or not run_id.isdigit():
+            raise ReleaseError("V8 run ID must be numeric")
+        if workflow_head_sha is None:
+            workflow_head_sha = head_sha
+        if SHA_RE.fullmatch(workflow_head_sha) is None:
+            raise ReleaseError("V8 workflow head SHA is invalid")
     if source_kind == "bootstrap":
         if bootstrap_candidate_run_id is None or not bootstrap_candidate_run_id.isdigit():
             raise ReleaseError("bootstrap V8 source requires a candidate run ID")
@@ -1148,16 +1169,19 @@ def finalize_v8_artifact(
     if actual_sums != expected_sums:
         raise ReleaseError("V8 checksum manifest does not match payloads")
     assets = {**payload, checksums_name: asset_record(v8_dir / checksums_name)}
-    descriptor = v8_input_descriptor(manifest, source_dir)
+    descriptor = v8_input_descriptor(manifest, source_dir, local=local)
     digest = v8_input_digest(descriptor)
     builder: dict[str, Any] = {
         "repository": manifest.distribution.repository,
-        "workflow": V8_WORKFLOW_PATH,
-        "run_id": run_id,
         "head_sha": head_sha,
-        "workflow_head_sha": workflow_head_sha,
         "source_kind": source_kind,
     }
+    if not local:
+        builder.update(
+            workflow=V8_WORKFLOW_PATH,
+            run_id=run_id,
+            workflow_head_sha=workflow_head_sha,
+        )
     if bootstrap_candidate_run_id is not None:
         builder["bootstrap_candidate_run_id"] = bootstrap_candidate_run_id
     result = {
@@ -1176,7 +1200,7 @@ def finalize_v8_artifact(
 
 
 def validate_v8_artifact(
-    manifest: Manifest, source_dir: Path, v8_dir: Path
+    manifest: Manifest, source_dir: Path, v8_dir: Path, *, allow_local: bool = False
 ) -> dict[str, Any]:
     archive_name, binding_name, checksums_name, build_name = v8_artifact_names(
         manifest
@@ -1196,7 +1220,13 @@ def validate_v8_artifact(
         raise ReleaseError(f"V8 artifact entries must be regular files: {unsafe}")
 
     metadata = read_json_object(v8_dir / build_name)
-    descriptor = v8_input_descriptor(manifest, source_dir)
+    builder = metadata.get("builder")
+    if not isinstance(builder, dict):
+        raise ReleaseError("V8 build has no builder identity")
+    local = builder.get("source_kind") == "local"
+    if local and not allow_local:
+        raise ReleaseError("local V8 artifacts are not accepted by Actions")
+    descriptor = v8_input_descriptor(manifest, source_dir, local=local)
     digest = v8_input_digest(descriptor)
     expected_tag = f"rusty-v8-riscv64-v{manifest.toolchain.rusty_v8}-{digest[:12]}"
     if metadata.get("schema_version") != SCHEMA_VERSION:
@@ -1205,27 +1235,31 @@ def validate_v8_artifact(
         raise ReleaseError("V8 release tag does not match inputs")
     if metadata.get("input_sha256") != digest or metadata.get("input") != descriptor:
         raise ReleaseError("V8 build input fingerprint does not match source")
-    builder = metadata.get("builder")
-    if not isinstance(builder, dict):
-        raise ReleaseError("V8 build has no builder identity")
     if builder.get("repository") != manifest.distribution.repository:
         raise ReleaseError("V8 builder repository does not match manifest")
-    if builder.get("workflow") != V8_WORKFLOW_PATH:
-        raise ReleaseError("V8 builder workflow is unexpected")
-    if not str(builder.get("run_id", "")).isdigit():
-        raise ReleaseError("V8 builder run ID is invalid")
     if SHA_RE.fullmatch(str(builder.get("head_sha", ""))) is None:
         raise ReleaseError("V8 builder head SHA is invalid")
-    if SHA_RE.fullmatch(
-        str(builder.get("workflow_head_sha", builder.get("head_sha", "")))
-    ) is None:
-        raise ReleaseError("V8 builder workflow head SHA is invalid")
-    if builder.get("source_kind") not in {"build", "bootstrap"}:
-        raise ReleaseError("V8 build source kind is invalid")
-    if builder.get("source_kind") == "bootstrap" and not str(
-        builder.get("bootstrap_candidate_run_id", "")
-    ).isdigit():
-        raise ReleaseError("V8 bootstrap candidate run ID is invalid")
+    if local:
+        actions_fields = (
+            "workflow", "run_id", "workflow_head_sha", "bootstrap_candidate_run_id"
+        )
+        if any(field in builder for field in actions_fields):
+            raise ReleaseError("local V8 builder cannot have Actions run metadata")
+    else:
+        if builder.get("workflow") != V8_WORKFLOW_PATH:
+            raise ReleaseError("V8 builder workflow is unexpected")
+        if not str(builder.get("run_id", "")).isdigit():
+            raise ReleaseError("V8 builder run ID is invalid")
+        if SHA_RE.fullmatch(
+            str(builder.get("workflow_head_sha", builder.get("head_sha", "")))
+        ) is None:
+            raise ReleaseError("V8 builder workflow head SHA is invalid")
+        if builder.get("source_kind") not in ("build", "bootstrap"):
+            raise ReleaseError("V8 build source kind is invalid")
+        if builder.get("source_kind") == "bootstrap" and not str(
+            builder.get("bootstrap_candidate_run_id", "")
+        ).isdigit():
+            raise ReleaseError("V8 bootstrap candidate run ID is invalid")
 
     expected_assets = {
         name: asset_record(v8_dir / name)
@@ -1428,6 +1462,12 @@ def check_release_state(
                 raise ReleaseError(
                     f"release asset size mismatch: {name}; {_revision_hint()}"
                 )
+            if (digest := asset.get("digest")) is not None and digest != (
+                f"sha256:{actual['sha256']}"
+            ):
+                raise ReleaseError(
+                    f"release asset digest mismatch: {name}; {_revision_hint()}"
+                )
             records[name] = actual
 
         release_lock = read_json_object(asset_dir / "release-lock.json")
@@ -1484,15 +1524,10 @@ def check_release_state(
             manifest.patches_dir
         ):
             identity_errors.append("patch_series_sha256")
-        if not str(candidate.get("candidate_run_id", "")).isdigit():
-            identity_errors.append("candidate_run_id")
-        if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
-            identity_errors.append("candidate_head_sha")
-        workflow_head_sha = candidate.get(
-            "candidate_workflow_head_sha", candidate.get("candidate_head_sha", "")
-        )
-        if SHA_RE.fullmatch(str(workflow_head_sha)) is None:
-            identity_errors.append("candidate_workflow_head_sha")
+        try:
+            _validate_candidate_identity(candidate)
+        except ReleaseError as error:
+            identity_errors.append(str(error))
         source = candidate.get("source")
         if not isinstance(source, dict) or source.get("status") != "ready":
             identity_errors.append("source.status")
@@ -1552,25 +1587,61 @@ def decide_build_required(
     return True, "no-formal-release"
 
 
+def _validate_candidate_identity(
+    candidate: Mapping[str, Any], *, expected_origin: str | None = None
+) -> str:
+    origin = candidate.get("build_origin", "github-actions")
+    if origin not in ("local", "github-actions"):
+        raise ReleaseError("candidate build origin is invalid")
+    if expected_origin is not None and origin != expected_origin:
+        raise ReleaseError(f"candidate build origin must be {expected_origin}")
+    head_sha = candidate.get("candidate_head_sha", "")
+    if SHA_RE.fullmatch(str(head_sha)) is None:
+        raise ReleaseError("candidate head SHA is invalid")
+    if origin == "local":
+        candidate_id = candidate.get("candidate_id")
+        if not isinstance(candidate_id, str) or not LOCAL_CANDIDATE_ID_RE.fullmatch(
+            candidate_id
+        ):
+            raise ReleaseError("local candidate ID is invalid")
+        if "candidate_run_id" in candidate or "candidate_workflow_head_sha" in candidate:
+            raise ReleaseError("local candidate cannot have Actions run metadata")
+    else:
+        if "candidate_id" in candidate:
+            raise ReleaseError("Actions candidate cannot have a local candidate ID")
+        if not str(candidate.get("candidate_run_id", "")).isdigit():
+            raise ReleaseError("candidate run ID is invalid")
+        workflow_head_sha = candidate.get("candidate_workflow_head_sha", head_sha)
+        if SHA_RE.fullmatch(str(workflow_head_sha)) is None:
+            raise ReleaseError("candidate workflow head SHA is invalid")
+    return origin
+
+
 def finalize_candidate(
     manifest: Manifest,
     candidate_dir: Path,
     *,
-    run_id: str,
+    run_id: str | None = None,
     head_sha: str,
     source_info_path: Path,
     workflow_head_sha: str | None = None,
+    local_candidate_id: str | None = None,
     created_at: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    if not run_id.isdigit():
-        raise ReleaseError("candidate run ID must be numeric")
-    if SHA_RE.fullmatch(head_sha) is None:
-        raise ReleaseError("candidate head SHA is invalid")
-    if workflow_head_sha is None:
-        workflow_head_sha = head_sha
-    if SHA_RE.fullmatch(workflow_head_sha) is None:
-        raise ReleaseError("candidate workflow head SHA is invalid")
-    source_info = json.loads(source_info_path.read_text(encoding="utf-8"))
+    identity: dict[str, Any] = {"candidate_head_sha": head_sha}
+    if local_candidate_id is not None:
+        if run_id is not None or workflow_head_sha is not None:
+            raise ReleaseError("local candidate cannot have Actions run metadata")
+        identity.update(build_origin="local", candidate_id=local_candidate_id)
+    else:
+        identity.update(
+            candidate_run_id=run_id,
+            candidate_workflow_head_sha=(
+                head_sha if workflow_head_sha is None else workflow_head_sha
+            ),
+        )
+    _validate_candidate_identity(identity)
+    source_info = read_json_object(source_info_path)
     if source_info.get("status") != "ready":
         raise ReleaseError("source-info does not describe a ready source tree")
     if source_info.get("upstream_commit_sha") != manifest.upstream.commit_sha:
@@ -1579,6 +1650,12 @@ def finalize_candidate(
         raise ReleaseError("source-info policy digest does not match manifest")
     if source_info.get("release_lock_sha256") != manifest.release_lock_sha256:
         raise ReleaseError("source-info release lock digest does not match manifest")
+    patch_digest = patch_series_digest(manifest.patches_dir)
+    if (
+        local_candidate_id is not None
+        and source_info.get("patch_series_sha256") != patch_digest
+    ):
+        raise ReleaseError("source-info patch-series digest does not match manifest")
 
     release_lock_path = candidate_dir / "release-lock.json"
     if read_json_object(release_lock_path) != manifest.release_lock():
@@ -1633,9 +1710,7 @@ def finalize_candidate(
     when = created_at or dt.datetime.now(dt.timezone.utc)
     candidate = {
         "schema_version": SCHEMA_VERSION,
-        "candidate_run_id": run_id,
-        "candidate_head_sha": head_sha,
-        "candidate_workflow_head_sha": workflow_head_sha,
+        **identity,
         "created_at": when.astimezone(dt.timezone.utc).isoformat(),
         "release_tag": manifest.release_tag,
         "package_version": manifest.package_version,
@@ -1643,7 +1718,7 @@ def finalize_candidate(
         "distribution": dataclasses.asdict(manifest.distribution),
         "policy_sha256": manifest.policy_sha256,
         "release_lock_sha256": manifest.release_lock_sha256,
-        "patch_series_sha256": patch_series_digest(manifest.patches_dir),
+        "patch_series_sha256": patch_digest,
         "source": source_info,
         "assets": assets,
     }
@@ -1661,15 +1736,18 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any]:
+def validate_candidate(
+    manifest: Manifest, candidate_dir: Path, *, expected_origin: str | None = None
+) -> dict[str, Any]:
     candidate = read_json_object(candidate_dir / "candidate.json")
     if candidate.get("schema_version") != SCHEMA_VERSION:
         raise ReleaseError("candidate schema is unsupported")
     if candidate.get("release_tag") != manifest.release_tag:
         raise ReleaseError("candidate release tag does not match manifest")
-    if candidate.get("patch_series_sha256") != patch_series_digest(
-        manifest.patches_dir
-    ):
+    if candidate.get("package_version") != manifest.package_version:
+        raise ReleaseError("candidate package version does not match manifest")
+    patch_digest = patch_series_digest(manifest.patches_dir)
+    if candidate.get("patch_series_sha256") != patch_digest:
         raise ReleaseError("candidate patch-series digest does not match")
     if candidate.get("upstream") != dataclasses.asdict(manifest.upstream):
         raise ReleaseError("candidate upstream identity does not match manifest")
@@ -1681,15 +1759,7 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("candidate release lock digest does not match manifest")
     if read_json_object(candidate_dir / "release-lock.json") != manifest.release_lock():
         raise ReleaseError("candidate release lock does not match manifest")
-    if not str(candidate.get("candidate_run_id", "")).isdigit():
-        raise ReleaseError("candidate run ID is invalid")
-    if SHA_RE.fullmatch(str(candidate.get("candidate_head_sha", ""))) is None:
-        raise ReleaseError("candidate head SHA is invalid")
-    workflow_head_sha = candidate.get(
-        "candidate_workflow_head_sha", candidate.get("candidate_head_sha", "")
-    )
-    if SHA_RE.fullmatch(str(workflow_head_sha)) is None:
-        raise ReleaseError("candidate workflow head SHA is invalid")
+    origin = _validate_candidate_identity(candidate, expected_origin=expected_origin)
     source = candidate.get("source")
     if not isinstance(source, dict) or source.get("status") != "ready":
         raise ReleaseError("candidate source reconstruction is not ready")
@@ -1699,6 +1769,8 @@ def validate_candidate(manifest: Manifest, candidate_dir: Path) -> dict[str, Any
         raise ReleaseError("candidate source policy digest does not match manifest")
     if source.get("release_lock_sha256") != manifest.release_lock_sha256:
         raise ReleaseError("candidate source release lock digest does not match manifest")
+    if origin == "local" and source.get("patch_series_sha256") != patch_digest:
+        raise ReleaseError("candidate source patch-series digest does not match manifest")
     assets = candidate.get("assets")
     if not isinstance(assets, dict):
         raise ReleaseError("candidate has no asset map")
@@ -1788,8 +1860,22 @@ def validate_validation_report(
 ) -> None:
     if report.get("schema_version") != SCHEMA_VERSION:
         raise ReleaseError("validation report schema is unsupported")
-    if str(report.get("candidate_run_id")) != str(candidate["candidate_run_id"]):
-        raise ReleaseError("validation report run ID does not match candidate")
+    origin = _validate_candidate_identity(candidate)
+    if report.get("build_origin", "github-actions") != origin:
+        raise ReleaseError("validation report build origin does not match candidate")
+    if origin == "local":
+        if report.get("candidate_id") != candidate["candidate_id"]:
+            raise ReleaseError("validation report local ID does not match candidate")
+        actions_fields = (
+            "candidate_run_id", "candidate_run_url", "candidate_workflow_head_sha"
+        )
+        if any(field in report for field in actions_fields):
+            raise ReleaseError("local validation report cannot have Actions run metadata")
+    else:
+        if "candidate_id" in report:
+            raise ReleaseError("Actions validation report cannot have a local candidate ID")
+        if str(report.get("candidate_run_id")) != str(candidate["candidate_run_id"]):
+            raise ReleaseError("validation report run ID does not match candidate")
     if report.get("candidate_head_sha") != candidate["candidate_head_sha"]:
         raise ReleaseError("validation report head SHA does not match candidate")
     if report.get("release_tag") != manifest.release_tag:
@@ -1798,6 +1884,8 @@ def validate_validation_report(
     has_validation_target = "validation_target" in report
     validation_target = report.get("validation_target")
     if not has_validation_target:
+        if origin == "local":
+            raise ReleaseError("local validation report has no validation target")
         # Reports produced by the original K3 validator predate the target
         # field and are accepted as native K3 evidence.
         validation_target = "native-k3"
@@ -1863,11 +1951,17 @@ def preflight_publish(
     candidate_dir: Path,
     k3_report_path: Path,
     *,
-    expected_run_id: str,
+    expected_run_id: str | None = None,
     now: dt.datetime | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    candidate = validate_candidate(manifest, candidate_dir)
-    if str(candidate.get("candidate_run_id")) != expected_run_id:
+    expected_origin = "local" if expected_run_id is None else "github-actions"
+    candidate = validate_candidate(
+        manifest, candidate_dir, expected_origin=expected_origin
+    )
+    if (
+        expected_run_id is not None
+        and str(candidate["candidate_run_id"]) != expected_run_id
+    ):
         raise ReleaseError("requested run ID does not match candidate metadata")
     report = read_json_object(k3_report_path)
     validate_validation_report(manifest, candidate, report, now=now)
