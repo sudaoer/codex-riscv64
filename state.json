@@ -252,6 +252,30 @@
       "status": "published",
       "version": "0.167.1"
     },
+    "44b5eaceccb13a7f7da58f5933105f940cdac71fa85f7e9f373665b10f3fcfaa": {
+      "created_at": "2026-11-20T02:40:58.957966+00:00",
+      "release_lock": {
+        "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
+        "schema_version": 1,
+        "toolchain": {
+          "rust": "1.99.1",
+          "rusty_v8": "152.2.0",
+          "zig": "0.14.0"
+        },
+        "upstream": {
+          "commit_sha": "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e",
+          "repository": "openai/codex",
+          "tag": "rust-v0.171.0",
+          "tag_object_sha": "295eca93394bb83a6ec8e0841033f3997f97fcbd",
+          "version": "0.171.0"
+        }
+      },
+      "release_tag": "riscv-v0.171.0-r1",
+      "runs": {},
+      "source_sha": "25827240f39d8c8e6b0dcb9b562e3f2ee33ecc34",
+      "status": "queued",
+      "version": "0.171.0"
+    },
     "593ea3030f05f4366128ff068abd07382d16561b8847b9897861b2032863c2c2": {
       "created_at": "2026-10-29T22:57:16.811087+00:00",
       "dispatched_at": "2026-10-29T22:57:16.811087+00:00",
