@@ -194,7 +194,7 @@
     "2d8ad96c4c3f0cf73f3631d1f0531014c3ea661836dc1cf99642ce64a41113a4": {
       "created_at": "2026-11-24T02:45:19.220224+00:00",
       "dispatched_at": "2026-11-24T02:45:19.220224+00:00",
-      "reason": "workflow is active",
+      "reason": "formal release exists",
       "release_lock": {
         "policy_sha256": "bde4eef6a708b29b0335fe15378aab45ebce13440051d4dbac91c35d440225c6",
         "schema_version": 1,
@@ -239,7 +239,7 @@
         }
       },
       "source_sha": "d3753781834a7c5fc1dc6049779d2e5bbb0a94f9",
-      "status": "running",
+      "status": "published",
       "version": "0.172.0"
     },
     "2f6f365f9b2bed66f8b5692fc3bff3fe7d05a9645bffeade5081758d62577705": {
