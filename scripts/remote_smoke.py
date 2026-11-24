@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
@@ -121,6 +122,7 @@ def run(
     command: list[str],
     *,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     input_text: str | None = None,
     timeout: float = 60,
     timeout_scale: float = 1.0,
@@ -128,6 +130,7 @@ def run(
     process = subprocess.Popen(
         command,
         cwd=cwd,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -388,6 +391,124 @@ def code_mode_smoke(host: Path, *, timeout_scale: float = 1.0) -> str:
     return f"protocol v1; {len(messages)} frames; marker observed"
 
 
+def code_mode_grpc_smoke(codex: Path, work: Path, *, timeout_scale: float) -> str:
+    """通过打包的 Codex 调用 Code Mode，并检查模型收到的执行结果。"""
+    requests: list[dict[str, Any]] = []
+    call_id = "release-smoke-exec"
+    marker = "riscv64-code-mode-ok"
+
+    class ResponsesHandler(BaseHTTPRequestHandler):
+        timeout = scaled_timeout(10, timeout_scale)
+
+        def do_POST(self) -> None:
+            if self.path != "/v1/responses" or len(requests) >= 2:
+                self.send_error(400, "Unexpected Code Mode smoke request")
+                return
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(json.loads(body))
+            response = {"id": f"resp-smoke-{len(requests)}"}
+            if len(requests) == 1:
+                item = {
+                    "type": "custom_tool_call",
+                    "call_id": call_id,
+                    "name": "exec",
+                    "input": "text('riscv64-' + 'code-mode-ok');",
+                }
+            else:
+                item = {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "msg-smoke-complete",
+                    "content": [{"type": "output_text", "text": "Smoke complete."}],
+                }
+            events = (
+                {"type": "response.created", "response": response},
+                {"type": "response.output_item.done", "item": item},
+                {"type": "response.completed", "response": response},
+            )
+            stream = "".join(
+                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+                for event in events
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(stream)))
+            self.end_headers()
+            self.wfile.write(stream)
+
+    config_dir = work / "code-mode-config"
+    config_dir.mkdir()
+    with HTTPServer(("127.0.0.1", 0), ResponsesHandler) as server:
+        (config_dir / "config.toml").write_text(
+            f"""model = "gpt-5.4"
+model_provider = "release_smoke"
+
+[model_providers.release_smoke]
+name = "Release smoke"
+base_url = "http://127.0.0.1:{server.server_port}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+
+[analytics]
+enabled = false
+
+[features]
+code_mode_only = true
+enable_request_compression = false
+remote_models = false
+
+[features.code_mode_host]
+enabled = true
+disable_in_process_fallback = true
+""",
+            encoding="utf-8",
+        )
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            run(
+                [
+                    str(codex),
+                    "exec",
+                    "--sandbox",
+                    "read-only",
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--json",
+                    "Run the Code Mode smoke check.",
+                ],
+                cwd=work,
+                env={
+                    "PATH": os.defpath,
+                    "CODEX_HOME": str(config_dir),
+                    "CODEX_SQLITE_HOME": str(config_dir),
+                },
+                input_text="",
+                timeout_scale=timeout_scale,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+
+    if len(requests) != 2 or not any(
+        tool.get("type") == "custom" and tool.get("name") == "exec"
+        for tool in requests[0].get("tools", [])
+    ):
+        raise SmokeError("Codex did not complete the Code Mode tool exchange")
+    outputs = [
+        item.get("output")
+        for item in requests[1].get("input", [])
+        if item.get("type") == "custom_tool_call_output"
+        and item.get("call_id") == call_id
+    ]
+    if len(outputs) != 1 or not contains_text(outputs[0], marker):
+        raise SmokeError(f"Code Mode did not return the JavaScript marker: {outputs}")
+    return "gRPC stdio; JavaScript marker observed"
+
+
 def extract(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True)
     with tarfile.open(archive, "r:gz") as value:
@@ -529,13 +650,21 @@ def main() -> int:
             return command([str(proxy_dir / "codex-responses-api-proxy"), "--help"])
 
         checked("responses-proxy-help", responses_proxy)
-        checked(
-            "code-mode-stdio",
-            lambda: code_mode_smoke(
+
+        def code_mode() -> str:
+            version = json.loads(release_json.read_text(encoding="utf-8"))["upstream"][
+                "version"
+            ]
+            if tuple(map(int, version.split("."))) >= (0, 172, 0):
+                return code_mode_grpc_smoke(
+                    codex, work, timeout_scale=args.timeout_scale
+                )
+            return code_mode_smoke(
                 package / "bin" / "codex-code-mode-host",
                 timeout_scale=args.timeout_scale,
-            ),
-        )
+            )
+
+        checked("code-mode-stdio", code_mode)
     except KeyboardInterrupt:
         interrupted = True
         details.setdefault("setup", "interrupted")

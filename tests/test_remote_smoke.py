@@ -5,9 +5,12 @@ import struct
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
+from http.client import HTTPConnection
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +119,9 @@ class RemoteSmokeTests(unittest.TestCase):
     def test_extract_failure_does_not_skip_independent_proxy_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "report.json"
+            (Path(directory) / "release.json").write_text(
+                json.dumps({"upstream": {"version": "0.171.0"}})
+            )
             argv = [
                 "remote_smoke.py",
                 "--candidate-dir",
@@ -146,6 +152,46 @@ class RemoteSmokeTests(unittest.TestCase):
         self.assertEqual(report["tests"]["app-server-help"], "fail")
         self.assertEqual(report["tests"]["responses-proxy-help"], "pass")
         self.assertEqual(report["tests"]["code-mode-stdio"], "pass")
+
+    def test_grpc_smoke_requires_a_marker_from_the_requested_call(self) -> None:
+        def fake_run(_command, *, env, **_kwargs):
+            config = tomllib.loads(
+                (Path(env["CODEX_HOME"]) / "config.toml").read_text()
+            )
+            provider = config["model_providers"][config["model_provider"]]
+            url = urlsplit(provider["base_url"])
+            connection = HTTPConnection(url.hostname, url.port, timeout=5)
+            try:
+                connection.request(
+                    "POST",
+                    "/v1/responses",
+                    json.dumps({"tools": [{"type": "custom", "name": "exec"}]}),
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+                output = {
+                    "type": "custom_tool_call_output",
+                    "call_id": "unrelated-call",
+                    "output": [{"type": "input_text", "text": "riscv64-code-mode-ok"}],
+                }
+                connection.request(
+                    "POST", "/v1/responses", json.dumps({"input": [output]})
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+            finally:
+                connection.close()
+            return "ok"
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(remote_smoke, "run", side_effect=fake_run),
+            self.assertRaisesRegex(remote_smoke.SmokeError, "JavaScript marker"),
+        ):
+            work = Path(directory)
+            remote_smoke.code_mode_grpc_smoke(work / "codex", work, timeout_scale=1.0)
 
     def test_code_mode_timeout_includes_bounded_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
